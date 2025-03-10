@@ -17,4 +17,10 @@ RUN git submodule update --init --recursive &&\
     autoconf &&\
     ./configure --prefix=/tests &&\
     PATH=/opt/riscv/bin:$PATH make -j6 && make install
-WORKDIR /tests
+WORKDIR /tests/share/riscv-tests/isa
+RUN mkdir /flats &&\
+    ls | grep -v \.dump$ | fgrep -v Makefile | xargs -INAME /opt/riscv/bin/riscv64-unknown-elf-objcopy -O binary NAME /flats/NAME.bin &&\
+    ls | grep \.dump$ | xargs -INAME mv NAME /flats/NAME
+
+WORKDIR /
+RUN tar cvf isa.tar.xz /flats
