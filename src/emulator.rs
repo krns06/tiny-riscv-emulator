@@ -269,6 +269,24 @@ impl Emulator {
 
                 self.write_reg(Register::X(rd), sign_extend(31, imm))?;
             } // LUI
+            0b01110 => {
+                let (rd, rs1, rs2, funct7) = extract_r_type(self.instruction);
+
+                match (funct3, funct7) {
+                    (0, 0) => {
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(
+                                31,
+                                self.read_reg(Register::X(rs1))?
+                                    .wrapping_add(self.read_reg(Register::X(rs2))?)
+                                    & 0xffffffff,
+                            ),
+                        )?;
+                    } // ADDW
+                    _ => return Err(IllegralInstruction),
+                }
+            }
             0b11000 => {
                 let (rs1, rs2, imm) = extract_b_type(self.instruction);
                 let offset = sign_extend(12, imm);

@@ -7,7 +7,12 @@ fn main() {
     // ヒープにするまで$cargo rでテストを行うことにする。
 
     const TEST_DIR: &str = "tests/isa/flats";
-    const TESTS: [&str; 1] = ["rv64ui-p-add.bin"];
+    const TESTS: [&str; 4] = [
+        "rv64ui-p-add.bin",
+        "rv64ui-p-addi.bin",
+        "rv64ui-p-addiw.bin",
+        "rv64ui-p-addw.bin",
+    ];
 
     for test in TESTS {
         emulator.load(format!("{}/{}", TEST_DIR, test)).unwrap();
@@ -16,6 +21,6 @@ fn main() {
 
         // gp(3)が1であることを確認する。
         assert!(emulator.regs()[2] == 1);
-        eprintln!("[info]: Test {} was successful.", test);
+        println!("[info]: Test {} was successful.", test);
     }
 }
