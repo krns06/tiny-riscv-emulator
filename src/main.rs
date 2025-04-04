@@ -7,11 +7,13 @@ fn main() {
     // ヒープにするまで$cargo rでテストを行うことにする。
 
     const TEST_DIR: &str = "tests/isa/flats";
-    const TESTS: [&str; 4] = [
+    const TESTS: [&str; 6] = [
         "rv64ui-p-add.bin",
         "rv64ui-p-addi.bin",
         "rv64ui-p-addiw.bin",
         "rv64ui-p-addw.bin",
+        "rv64ui-p-and.bin",
+        "rv64ui-p-andi.bin",
     ];
 
     for test in TESTS {

@@ -208,10 +208,6 @@ impl Emulator {
                         self.read_reg(Register::X(rs1))?
                             .wrapping_add(sign_extend(11, imm)),
                     )?, //ADDI
-                    (0b110, _) => self.write_reg(
-                        Register::X(rd),
-                        self.read_reg(Register::X(rs1))? | sign_extend(11, imm),
-                    )?,
                     (0b001, 0b000000) => {
                         // RV32IとRV64Iにどちらにも存在しているのでRV64Iの方を優先した。
                         self.write_reg(
@@ -219,6 +215,14 @@ impl Emulator {
                             self.read_reg(Register::X(rs1))? << (imm & 0x3f),
                         )?;
                     } // SLLI
+                    (0b110, _) => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))? | sign_extend(11, imm),
+                    )?, // ORI
+                    (0b111, _) => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))? & sign_extend(11, imm),
+                    )?, // ANDI
                     _ => return Err(IllegralInstruction),
                 };
             }
@@ -257,6 +261,10 @@ impl Emulator {
                         self.read_reg(Register::X(rs1))?
                             .wrapping_add(self.read_reg(Register::X(rs2))?),
                     )?, // ADD
+                    (0b111, 0) => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))? & self.read_reg(Register::X(rs2))?,
+                    )?,
                     _ => return Err(IllegralInstruction),
                 }
             }
@@ -303,9 +311,13 @@ impl Emulator {
                             self.read_reg(Register::X(rs1))? != self.read_reg(Register::X(rs2))?;
                     } // BNE
                     0b101 => {
+                        flag = self.read_reg(Register::X(rs1))? as i64
+                            >= self.read_reg(Register::X(rs2))? as i64;
+                    } // BGE
+                    0b111 => {
                         flag =
                             self.read_reg(Register::X(rs1))? >= self.read_reg(Register::X(rs2))?;
-                    } // BGE
+                    } // BGEU
                     _ => return Err(IllegralInstruction),
                 };
 
