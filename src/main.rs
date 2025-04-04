@@ -7,16 +7,17 @@ fn main() {
     // ヒープにするまで$cargo rでテストを行うことにする。
 
     const TEST_DIR: &str = "tests/isa/flats";
-    const TESTS: [&str; 6] = [
+    let tests = [
         "rv64ui-p-add.bin",
         "rv64ui-p-addi.bin",
         "rv64ui-p-addiw.bin",
         "rv64ui-p-addw.bin",
         "rv64ui-p-and.bin",
         "rv64ui-p-andi.bin",
+        "rv64ui-p-auipc.bin",
     ];
 
-    for test in TESTS {
+    for test in tests {
         emulator.load(format!("{}/{}", TEST_DIR, test)).unwrap();
 
         emulator.run();

@@ -227,10 +227,12 @@ impl Emulator {
                 };
             }
             0b00101 => {
-                // RISCV原典には符号拡張されると書いてあったが仕様書とChatGPT曰く符号拡張されないらしい。どうなんでしょうね。
                 let (rd, imm) = extract_u_type(self.instruction);
 
-                self.write_reg(Register::X(rd), self.read_reg(Register::Pc)? + imm)?;
+                self.write_reg(
+                    Register::X(rd),
+                    self.read_reg(Register::Pc)? + sign_extend(31, imm),
+                )?;
             } // AUIPC
             0b00110 => {
                 let (rd, rs1, imm) = extract_i_type(self.instruction);
@@ -261,6 +263,11 @@ impl Emulator {
                         self.read_reg(Register::X(rs1))?
                             .wrapping_add(self.read_reg(Register::X(rs2))?),
                     )?, // ADD
+                    (0, 0b0100000) => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))?
+                            .wrapping_sub(self.read_reg(Register::X(rs2))?),
+                    )?, // SUB
                     (0b111, 0) => self.write_reg(
                         Register::X(rd),
                         self.read_reg(Register::X(rs1))? & self.read_reg(Register::X(rs2))?,
@@ -270,10 +277,6 @@ impl Emulator {
             }
             0b01101 => {
                 let (rd, imm) = extract_u_type(self.instruction);
-
-                // 仕様書では符号拡張は言及されていなかったので符号拡張しないものかと思ったが
-                // モナリザ本では符号拡張すると書いてあったのでしてみたらテストを通った。
-                // これは実機検証、言及箇所発見が必要。
 
                 self.write_reg(Register::X(rd), sign_extend(31, imm))?;
             } // LUI
