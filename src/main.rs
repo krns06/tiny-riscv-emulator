@@ -1,18 +1,21 @@
 use tiny_riscv_emulator::emulator::Emulator;
 
-fn show_emulator(emulator: &Emulator) {
-    println!("Current PC: 0x{:016x}", emulator.pc());
-    println!("Regs: {:?}", emulator.regs());
-    println!("memory: ...");
-}
-
 fn main() {
     let mut emulator = Emulator::default();
 
-    emulator
-        .load("tests/self_made_test_src/return_100.bin")
-        .unwrap();
+    // メモリをなぜかスタックに固定で確保する実装になっているのでそれを
+    // ヒープにするまで$cargo rでテストを行うことにする。
 
-    emulator.run();
-    show_emulator(&emulator);
+    const TEST_DIR: &str = "tests/isa/flats";
+    const TESTS: [&str; 1] = ["rv64ui-p-add.bin"];
+
+    for test in TESTS {
+        emulator.load(format!("{}/{}", TEST_DIR, test)).unwrap();
+
+        emulator.run();
+
+        // gp(3)が1であることを確認する。
+        assert!(emulator.regs()[2] == 1);
+        eprintln!("[info]: Test {} was successful.", test);
+    }
 }
