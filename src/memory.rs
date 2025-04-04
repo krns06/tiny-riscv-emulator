@@ -85,7 +85,7 @@ impl<const MAX: usize> Memory<MAX> {
             self.array[address..].copy_from_slice(&values[..diff]);
             self.array[..diff].copy_from_slice(&values[diff..]);
         } else {
-            self.array[address..].copy_from_slice(values);
+            self.array[address..address + size].copy_from_slice(values);
         }
     }
 

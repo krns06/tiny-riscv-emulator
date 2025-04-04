@@ -38,6 +38,14 @@ fn extract_i_type(instruction: u32) -> (u8, u8, u64) {
     (rd as u8, rs1 as u8, imm)
 }
 
+fn extract_s_type(instruction: u32) -> (u8, u8, u64) {
+    let rs1 = (instruction >> 15) & 0x1f;
+    let rs2 = (instruction >> 20) & 0x1f;
+    let imm = ((instruction & 0xfe000000) >> 20) | ((instruction & 0xf80) >> 7);
+
+    (rs1 as u8, rs2 as u8, imm as u64)
+}
+
 fn extract_b_type(instruction: u32) -> (u8, u8, u64) {
     let rs1 = (instruction >> 15) & 0x1f;
     let rs2 = (instruction >> 20) & 0x1f;
@@ -158,8 +166,8 @@ impl Emulator {
         self.csr.write_csr(csr, value)
     }
 
-    fn check_misaligned(&self, offset: u64) -> Result<()> {
-        if (self.pc.wrapping_add(offset)) % 4 == 0 {
+    fn check_misaligned(&self, address: u64) -> Result<()> {
+        if address % 4 == 0 {
             Ok(())
         } else {
             Err(InstructionAddressMissaligned)
@@ -187,6 +195,25 @@ impl Emulator {
         let funct3 = (self.instruction >> 12) & 0x7;
 
         match op {
+            0b00000 => {
+                let (rd, rs1, imm) = extract_i_type(self.instruction);
+
+                match funct3 {
+                    0b001 => {
+                        let bytes = self.read_memory::<2>(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                        )?;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(31, u16::from_le_bytes(bytes) as u64),
+                        )?;
+                    } // LH
+                    _ => return Err(IllegralInstruction),
+                }
+            }
             0b00011 => {
                 // 並行処理系の工夫する構造はないので作るまでは実装しない。
                 eprintln!("[warning]: fence may not work properly.");
@@ -208,10 +235,6 @@ impl Emulator {
                         self.read_reg(Register::X(rs1))?
                             .wrapping_add(sign_extend(11, imm)),
                     )?, //ADDI
-                    (0b110, _) => self.write_reg(
-                        Register::X(rd),
-                        self.read_reg(Register::X(rs1))? | sign_extend(11, imm),
-                    )?,
                     (0b001, 0b000000) => {
                         // RV32IとRV64Iにどちらにも存在しているのでRV64Iの方を優先した。
                         self.write_reg(
@@ -219,14 +242,24 @@ impl Emulator {
                             self.read_reg(Register::X(rs1))? << (imm & 0x3f),
                         )?;
                     } // SLLI
+                    (0b110, _) => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))? | sign_extend(11, imm),
+                    )?, // ORI
+                    (0b111, _) => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))? & sign_extend(11, imm),
+                    )?, // ANDI
                     _ => return Err(IllegralInstruction),
                 };
             }
             0b00101 => {
-                // RISCV原典には符号拡張されると書いてあったが仕様書とChatGPT曰く符号拡張されないらしい。どうなんでしょうね。
                 let (rd, imm) = extract_u_type(self.instruction);
 
-                self.write_reg(Register::X(rd), self.read_reg(Register::Pc)? + imm)?;
+                self.write_reg(
+                    Register::X(rd),
+                    self.read_reg(Register::Pc)? + sign_extend(31, imm),
+                )?;
             } // AUIPC
             0b00110 => {
                 let (rd, rs1, imm) = extract_i_type(self.instruction);
@@ -246,6 +279,23 @@ impl Emulator {
                     _ => return Err(IllegralInstruction),
                 }
             }
+            0b01000 => {
+                let (rs1, rs2, imm) = extract_s_type(self.instruction);
+
+                match funct3 {
+                    0b001 => {
+                        let bytes = (self.read_reg(Register::X(rs2))? as u16).to_le_bytes();
+
+                        self.write_memory(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                            &bytes,
+                        )?;
+                    } // SH
+                    _ => return Err(IllegralInstruction),
+                }
+            }
             0b01100 => {
                 let (rd, rs1, rs2, funct7) = extract_r_type(self.instruction);
 
@@ -257,18 +307,41 @@ impl Emulator {
                         self.read_reg(Register::X(rs1))?
                             .wrapping_add(self.read_reg(Register::X(rs2))?),
                     )?, // ADD
+                    (0, 0b0100000) => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))?
+                            .wrapping_sub(self.read_reg(Register::X(rs2))?),
+                    )?, // SUB
+                    (0b111, 0) => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))? & self.read_reg(Register::X(rs2))?,
+                    )?,
                     _ => return Err(IllegralInstruction),
                 }
             }
             0b01101 => {
                 let (rd, imm) = extract_u_type(self.instruction);
 
-                // 仕様書では符号拡張は言及されていなかったので符号拡張しないものかと思ったが
-                // モナリザ本では符号拡張すると書いてあったのでしてみたらテストを通った。
-                // これは実機検証、言及箇所発見が必要。
-
                 self.write_reg(Register::X(rd), sign_extend(31, imm))?;
             } // LUI
+            0b01110 => {
+                let (rd, rs1, rs2, funct7) = extract_r_type(self.instruction);
+
+                match (funct3, funct7) {
+                    (0, 0) => {
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(
+                                31,
+                                self.read_reg(Register::X(rs1))?
+                                    .wrapping_add(self.read_reg(Register::X(rs2))?)
+                                    & 0xffffffff,
+                            ),
+                        )?;
+                    } // ADDW
+                    _ => return Err(IllegralInstruction),
+                }
+            }
             0b11000 => {
                 let (rs1, rs2, imm) = extract_b_type(self.instruction);
                 let offset = sign_extend(12, imm);
@@ -284,35 +357,59 @@ impl Emulator {
                         flag =
                             self.read_reg(Register::X(rs1))? != self.read_reg(Register::X(rs2))?;
                     } // BNE
+                    0b100 => {
+                        flag = self.read_reg(Register::X(rs2))? as i64
+                            > self.read_reg(Register::X(rs1))? as i64;
+                    } // BLT
                     0b101 => {
+                        flag = self.read_reg(Register::X(rs1))? as i64
+                            >= self.read_reg(Register::X(rs2))? as i64;
+                    } // BGE
+                    0b110 => {
+                        flag =
+                            self.read_reg(Register::X(rs2))? > self.read_reg(Register::X(rs1))?;
+                    } // BLT
+                    0b111 => {
                         flag =
                             self.read_reg(Register::X(rs1))? >= self.read_reg(Register::X(rs2))?;
-                    } // BGE
+                    } // BGEU
                     _ => return Err(IllegralInstruction),
                 };
 
                 if flag {
-                    self.check_misaligned(offset)?;
+                    let dst = self.read_reg(Register::Pc)?.wrapping_add(offset);
+                    self.check_misaligned(dst)?;
 
-                    self.write_reg(
-                        Register::Pc,
-                        self.read_reg(Register::Pc)?.wrapping_add(offset),
-                    )?;
+                    self.write_reg(Register::Pc, dst)?;
                     return Ok(EmulatorFlag::Jump);
                 }
             }
+            0b11001 => {
+                let (rd, rs1, imm) = extract_i_type(self.instruction);
+                let offset = sign_extend(11, imm);
+
+                let pc = self.read_reg(Register::Pc)?;
+                let dst = self.read_reg(Register::X(rs1))?.wrapping_add(offset) & !1;
+
+                self.check_misaligned(dst)?;
+
+                self.write_reg(Register::X(rd), pc + 4)?;
+                self.write_reg(Register::Pc, dst)?;
+                return Ok(EmulatorFlag::Jump);
+            } // JALR
             0b11011 => {
                 let (rd, imm) = extract_j_type(self.instruction);
                 let offset = sign_extend(20, imm);
 
                 let pc = self.read_reg(Register::Pc)?;
+                let dst = pc.wrapping_add(offset);
 
                 // ターゲットアドレスが4byteでアライメントされていない場合はアライメントの例外を起こす。
 
-                self.check_misaligned(offset)?;
+                self.check_misaligned(dst)?;
 
                 self.write_reg(Register::X(rd), pc + 4)?;
-                self.write_reg(Register::Pc, pc + offset)?;
+                self.write_reg(Register::Pc, dst)?;
                 return Ok(EmulatorFlag::Jump);
             } //JAL
             0b11100 => {
