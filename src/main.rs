@@ -15,6 +15,12 @@ fn main() {
         "rv64ui-p-and.bin",
         "rv64ui-p-andi.bin",
         "rv64ui-p-auipc.bin",
+        "rv64ui-p-beq.bin",
+        "rv64ui-p-bge.bin",
+        "rv64ui-p-bgeu.bin",
+        "rv64ui-p-blt.bin",
+        "rv64ui-p-bltu.bin",
+        "rv64ui-p-bne.bin",
     ];
 
     for test in tests {

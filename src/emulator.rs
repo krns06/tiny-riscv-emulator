@@ -313,10 +313,18 @@ impl Emulator {
                         flag =
                             self.read_reg(Register::X(rs1))? != self.read_reg(Register::X(rs2))?;
                     } // BNE
+                    0b100 => {
+                        flag = self.read_reg(Register::X(rs2))? as i64
+                            > self.read_reg(Register::X(rs1))? as i64;
+                    } // BLT
                     0b101 => {
                         flag = self.read_reg(Register::X(rs1))? as i64
                             >= self.read_reg(Register::X(rs2))? as i64;
                     } // BGE
+                    0b110 => {
+                        flag =
+                            self.read_reg(Register::X(rs2))? > self.read_reg(Register::X(rs1))?;
+                    } // BLT
                     0b111 => {
                         flag =
                             self.read_reg(Register::X(rs1))? >= self.read_reg(Register::X(rs2))?;
