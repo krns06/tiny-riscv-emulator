@@ -38,6 +38,14 @@ fn extract_i_type(instruction: u32) -> (u8, u8, u64) {
     (rd as u8, rs1 as u8, imm)
 }
 
+fn extract_s_type(instruction: u32) -> (u8, u8, u64) {
+    let rs1 = (instruction >> 15) & 0x1f;
+    let rs2 = (instruction >> 20) & 0x1f;
+    let imm = ((instruction & 0xfe000000) >> 20) | ((instruction & 0xf80) >> 7);
+
+    (rs1 as u8, rs2 as u8, imm as u64)
+}
+
 fn extract_b_type(instruction: u32) -> (u8, u8, u64) {
     let rs1 = (instruction >> 15) & 0x1f;
     let rs2 = (instruction >> 20) & 0x1f;
@@ -158,8 +166,8 @@ impl Emulator {
         self.csr.write_csr(csr, value)
     }
 
-    fn check_misaligned(&self, offset: u64) -> Result<()> {
-        if (self.pc.wrapping_add(offset)) % 4 == 0 {
+    fn check_misaligned(&self, address: u64) -> Result<()> {
+        if address % 4 == 0 {
             Ok(())
         } else {
             Err(InstructionAddressMissaligned)
@@ -187,6 +195,25 @@ impl Emulator {
         let funct3 = (self.instruction >> 12) & 0x7;
 
         match op {
+            0b00000 => {
+                let (rd, rs1, imm) = extract_i_type(self.instruction);
+
+                match funct3 {
+                    0b001 => {
+                        let bytes = self.read_memory::<2>(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                        )?;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(31, u16::from_le_bytes(bytes) as u64),
+                        )?;
+                    } // LH
+                    _ => return Err(IllegralInstruction),
+                }
+            }
             0b00011 => {
                 // 並行処理系の工夫する構造はないので作るまでは実装しない。
                 eprintln!("[warning]: fence may not work properly.");
@@ -249,6 +276,23 @@ impl Emulator {
                             ),
                         )?;
                     } // ADDIW
+                    _ => return Err(IllegralInstruction),
+                }
+            }
+            0b01000 => {
+                let (rs1, rs2, imm) = extract_s_type(self.instruction);
+
+                match funct3 {
+                    0b001 => {
+                        let bytes = (self.read_reg(Register::X(rs2))? as u16).to_le_bytes();
+
+                        self.write_memory(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                            &bytes,
+                        )?;
+                    } // SH
                     _ => return Err(IllegralInstruction),
                 }
             }
@@ -333,27 +377,39 @@ impl Emulator {
                 };
 
                 if flag {
-                    self.check_misaligned(offset)?;
+                    let dst = self.read_reg(Register::Pc)?.wrapping_add(offset);
+                    self.check_misaligned(dst)?;
 
-                    self.write_reg(
-                        Register::Pc,
-                        self.read_reg(Register::Pc)?.wrapping_add(offset),
-                    )?;
+                    self.write_reg(Register::Pc, dst)?;
                     return Ok(EmulatorFlag::Jump);
                 }
             }
+            0b11001 => {
+                let (rd, rs1, imm) = extract_i_type(self.instruction);
+                let offset = sign_extend(11, imm);
+
+                let pc = self.read_reg(Register::Pc)?;
+                let dst = self.read_reg(Register::X(rs1))?.wrapping_add(offset) & !1;
+
+                self.check_misaligned(dst)?;
+
+                self.write_reg(Register::X(rd), pc + 4)?;
+                self.write_reg(Register::Pc, dst)?;
+                return Ok(EmulatorFlag::Jump);
+            } // JALR
             0b11011 => {
                 let (rd, imm) = extract_j_type(self.instruction);
                 let offset = sign_extend(20, imm);
 
                 let pc = self.read_reg(Register::Pc)?;
+                let dst = pc.wrapping_add(offset);
 
                 // ターゲットアドレスが4byteでアライメントされていない場合はアライメントの例外を起こす。
 
-                self.check_misaligned(offset)?;
+                self.check_misaligned(dst)?;
 
                 self.write_reg(Register::X(rd), pc + 4)?;
-                self.write_reg(Register::Pc, pc + offset)?;
+                self.write_reg(Register::Pc, dst)?;
                 return Ok(EmulatorFlag::Jump);
             } //JAL
             0b11100 => {

@@ -21,6 +21,7 @@ fn main() {
         "rv64ui-p-blt.bin",
         "rv64ui-p-bltu.bin",
         "rv64ui-p-bne.bin",
+        "rv64ui-p-fence_i.bin",
     ];
 
     for test in tests {
