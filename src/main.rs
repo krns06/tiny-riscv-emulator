@@ -34,6 +34,8 @@ fn main() {
         "rv64ui-p-lw.bin",
         "rv64ui-p-lwu.bin",
         "rv64ui-p-ma_data.bin",
+        "rv64ui-p-or.bin",
+        "rv64ui-p-ori.bin",
     ];
 
     for test in tests {

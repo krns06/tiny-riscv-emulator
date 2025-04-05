@@ -418,10 +418,14 @@ impl Emulator {
                         self.read_reg(Register::X(rs1))?
                             .wrapping_sub(self.read_reg(Register::X(rs2))?),
                     )?, // SUB
+                    (0b110, 0) => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))? | (self.read_reg(Register::X(rs2))?),
+                    )?, // OR
                     (0b111, 0) => self.write_reg(
                         Register::X(rd),
                         self.read_reg(Register::X(rs1))? & self.read_reg(Register::X(rs2))?,
-                    )?,
+                    )?, // AND
                     _ => return Err(IllegralInstruction),
                 }
             }
