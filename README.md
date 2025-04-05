@@ -7,3 +7,4 @@
 
 # 目標
 - [x] riscv-testsのrv64ui-p-*を通す。
+- [x] riscv-testsのrv64um-p-*を通す。
