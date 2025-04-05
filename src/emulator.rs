@@ -199,6 +199,18 @@ impl Emulator {
                 let (rd, rs1, imm) = extract_i_type(self.instruction);
 
                 match funct3 {
+                    0b000 => {
+                        let bytes = self.read_memory::<1>(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                        )?;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(7, u8::from_le_bytes(bytes) as u64),
+                        )?;
+                    } // LB
                     0b001 => {
                         let bytes = self.read_memory::<2>(
                             self.read_reg(Register::X(rs1))?
@@ -208,9 +220,57 @@ impl Emulator {
 
                         self.write_reg(
                             Register::X(rd),
-                            sign_extend(31, u16::from_le_bytes(bytes) as u64),
+                            sign_extend(15, u16::from_le_bytes(bytes) as u64),
                         )?;
                     } // LH
+                    0b010 => {
+                        let bytes = self.read_memory::<4>(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                        )?;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(31, u32::from_le_bytes(bytes) as u64),
+                        )?;
+                    } // LW
+                    0b011 => {
+                        let bytes = self.read_memory::<8>(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                        )?;
+
+                        self.write_reg(Register::X(rd), u64::from_le_bytes(bytes))?;
+                    } // LD
+                    0b100 => {
+                        let bytes = self.read_memory::<1>(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                        )?;
+
+                        self.write_reg(Register::X(rd), u8::from_le_bytes(bytes) as u64)?;
+                    } // LBU
+                    0b101 => {
+                        let bytes = self.read_memory::<2>(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                        )?;
+
+                        self.write_reg(Register::X(rd), u16::from_le_bytes(bytes) as u64)?;
+                    } // LHU
+                    0b110 => {
+                        let bytes = self.read_memory::<4>(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                        )?;
+
+                        self.write_reg(Register::X(rd), u32::from_le_bytes(bytes) as u64)?;
+                    } // LHU
                     _ => return Err(IllegralInstruction),
                 }
             }
@@ -229,19 +289,33 @@ impl Emulator {
             0b00100 => {
                 let (rd, rs1, imm) = extract_i_type(self.instruction);
 
-                match (funct3, imm >> 26) {
+                match (funct3, imm >> 6) {
                     (0b000, _) => self.write_reg(
                         Register::X(rd),
                         self.read_reg(Register::X(rs1))?
                             .wrapping_add(sign_extend(11, imm)),
                     )?, //ADDI
                     (0b001, 0b000000) => {
-                        // RV32IとRV64Iにどちらにも存在しているのでRV64Iの方を優先した。
                         self.write_reg(
                             Register::X(rd),
                             self.read_reg(Register::X(rs1))? << (imm & 0x3f),
                         )?;
                     } // SLLI
+                    (0b101, 0b000000) => {
+                        self.write_reg(
+                            Register::X(rd),
+                            self.read_reg(Register::X(rs1))? >> (imm & 0x3f),
+                        )?;
+                    } // SRLI
+                    (0b101, 0b010000) => {
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(
+                                63 - (imm as u8 & 0x3f),
+                                self.read_reg(Register::X(rs1))? >> (imm & 0x3f),
+                            ),
+                        )?;
+                    } // SRAI
                     (0b110, _) => self.write_reg(
                         Register::X(rd),
                         self.read_reg(Register::X(rs1))? | sign_extend(11, imm),
@@ -282,7 +356,19 @@ impl Emulator {
             0b01000 => {
                 let (rs1, rs2, imm) = extract_s_type(self.instruction);
 
+                // 簡単にリファクタできるかもしれない
+
                 match funct3 {
+                    0b000 => {
+                        let bytes = (self.read_reg(Register::X(rs2))? as u8).to_le_bytes();
+
+                        self.write_memory(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                            &bytes,
+                        )?;
+                    } // SB
                     0b001 => {
                         let bytes = (self.read_reg(Register::X(rs2))? as u16).to_le_bytes();
 
@@ -293,6 +379,26 @@ impl Emulator {
                             &bytes,
                         )?;
                     } // SH
+                    0b010 => {
+                        let bytes = (self.read_reg(Register::X(rs2))? as u32).to_le_bytes();
+
+                        self.write_memory(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                            &bytes,
+                        )?;
+                    } // SW
+                    0b011 => {
+                        let bytes = self.read_reg(Register::X(rs2))?.to_le_bytes();
+
+                        self.write_memory(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                            &bytes,
+                        )?;
+                    } // SD
                     _ => return Err(IllegralInstruction),
                 }
             }
@@ -501,6 +607,11 @@ impl Emulator {
         loop {
             eprintln!("PC: 0x{:016x}", self.pc,);
             self.fetch();
+
+            //if self.pc == 0x1b0 {
+            //    self.show_regs();
+            //    panic!("0x1b0");
+            //}
 
             match self.exec() {
                 Err(e) => {
