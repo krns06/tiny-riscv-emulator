@@ -585,10 +585,31 @@ impl Emulator {
                         Register::X(rd),
                         self.read_reg(Register::X(rs1))? | self.read_reg(Register::X(rs2))?,
                     )?, // OR
+                    (0b110, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))?;
+                        let rs2 = self.read_reg(Register::X(rs2))?;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            if rs1 == 1 << 63 && rs2 == !0 {
+                                0
+                            } else if rs2 == 0 {
+                                rs1
+                            } else {
+                                (rs1 as i64 % rs2 as i64) as u64
+                            },
+                        )?
+                    } // REM
                     (0b111, 0) => self.write_reg(
                         Register::X(rd),
                         self.read_reg(Register::X(rs1))? & self.read_reg(Register::X(rs2))?,
                     )?, // AND
+                    (0b111, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))?;
+                        let rs2 = self.read_reg(Register::X(rs2))?;
+
+                        self.write_reg(Register::X(rd), if rs2 == 0 { rs1 } else { rs1 % rs2 })?;
+                    } // REMU
                     _ => return Err(IllegralInstruction),
                 }
             }
@@ -690,6 +711,30 @@ impl Emulator {
                             ),
                         )?;
                     } // SRAW
+                    (0b110, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))? & 0xffffffff;
+                        let rs2 = self.read_reg(Register::X(rs2))? & 0xffffffff;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            if rs1 == 1 << 31 && rs2 == 0xffffffff {
+                                0
+                            } else if rs2 == 0 {
+                                sign_extend(31, rs1)
+                            } else {
+                                (rs1 as i32 % rs2 as i32) as u64
+                            },
+                        )?;
+                    } // REMW
+                    (0b111, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))? & 0xffffffff;
+                        let rs2 = self.read_reg(Register::X(rs2))? & 0xffffffff;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(31, if rs2 == 0 { rs1 } else { rs1 % rs2 }),
+                        )?;
+                    } // REMUW
                     _ => return Err(IllegralInstruction),
                 }
             }
