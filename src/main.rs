@@ -33,6 +33,7 @@ fn main() {
         "rv64ui-p-lui.bin",
         "rv64ui-p-lw.bin",
         "rv64ui-p-lwu.bin",
+        "rv64ui-p-ma_data.bin",
     ];
 
     for test in tests {
