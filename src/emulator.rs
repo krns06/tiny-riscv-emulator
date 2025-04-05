@@ -503,11 +503,41 @@ impl Emulator {
                             self.read_reg(Register::X(rs1))? ^ self.read_reg(Register::X(rs2))?,
                         )?;
                     } // XOR
+                    (0b100, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))?;
+                        let rs2 = self.read_reg(Register::X(rs2))?;
+
+                        // 符号付きの割り算
+                        // 符号のオーバーフローが起こった場合はrs1の値
+                        // 0で割り算する場合はすべてのbitが１になっている値
+                        // 以外は普通にわり算の値
+                        // をrdにセットする。
+
+                        self.write_reg(
+                            Register::X(rd),
+                            if rs1 == 1 << 63 && rs2 == !0 {
+                                rs1
+                            } else if rs2 == 0 {
+                                u64::MAX
+                            } else {
+                                (rs1 as i64 / rs2 as i64) as u64
+                            },
+                        )?;
+                    } // DIV
                     (0b101, 0) => {
                         let shift = self.read_reg(Register::X(rs2))? & 0x3f;
 
                         self.write_reg(Register::X(rd), self.read_reg(Register::X(rs1))? >> shift)?;
                     } // SRL
+                    (0b101, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))?;
+                        let rs2 = self.read_reg(Register::X(rs2))?;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            if rs2 == 0 { u64::MAX } else { rs1 / rs2 },
+                        )?;
+                    } // DIVU
                     (0b101, 0b0100000) => {
                         let shift = self.read_reg(Register::X(rs2))? & 0x3f;
 
@@ -572,6 +602,21 @@ impl Emulator {
                             ),
                         )?;
                     } // SLLW
+                    (0b100, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))? as i32;
+                        let rs2 = self.read_reg(Register::X(rs2))? as i32;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            if rs1 == i32::MIN && rs2 == !0 {
+                                rs1 as u64
+                            } else if rs2 == 0 {
+                                u64::MAX
+                            } else {
+                                (rs1 / rs2) as u64
+                            },
+                        )?;
+                    } // SLLW
                     (0b101, 0) => {
                         let shift = self.read_reg(Register::X(rs2))? & 0x1f;
                         self.write_reg(
@@ -583,6 +628,19 @@ impl Emulator {
                             ),
                         )?;
                     } // SRLW
+                    (0b101, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))?;
+                        let rs2 = self.read_reg(Register::X(rs2))?;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            if rs2 == 0 {
+                                u64::MAX
+                            } else {
+                                sign_extend(31, (rs1 / rs2) & 0xffffffff)
+                            },
+                        )?;
+                    } // DIVUW
                     (0b101, 0b0100000) => {
                         let shift = self.read_reg(Register::X(rs2))? & 0x1f;
                         self.write_reg(
