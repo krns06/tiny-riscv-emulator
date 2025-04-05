@@ -21,6 +21,12 @@ fn sign_extend(bit: u8, v: u64) -> u64 {
     (mask + v) ^ mask
 }
 
+fn sign_extend_128bit(bit: u8, v: u128) -> u128 {
+    let mask = (u128::MAX >> 1) ^ (2u128.pow(bit as u32) - 1);
+
+    (mask + v) ^ mask
+}
+
 fn extract_r_type(instruction: u32) -> (u8, u8, u8, u8) {
     let rd = (instruction >> 7) & 0x1f;
     let rs1 = (instruction >> 15) & 0x1f;
@@ -469,6 +475,11 @@ impl Emulator {
                         self.read_reg(Register::X(rs1))?
                             .wrapping_add(self.read_reg(Register::X(rs2))?),
                     )?, // ADD
+                    (0, 0b0000001) => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))?
+                            .wrapping_mul(self.read_reg(Register::X(rs2))?),
+                    )?, // MUL
                     (0, 0b0100000) => self.write_reg(
                         Register::X(rd),
                         self.read_reg(Register::X(rs1))?
@@ -479,6 +490,15 @@ impl Emulator {
                         self.read_reg(Register::X(rs1))?
                             << (self.read_reg(Register::X(rs2))? & 0x3f),
                     )?, // SLL
+                    (0b001, 0b0000001) => {
+                        let rs1 = sign_extend_128bit(63, self.read_reg(Register::X(rs1))? as u128);
+                        let rs2 = sign_extend_128bit(63, self.read_reg(Register::X(rs2))? as u128);
+
+                        self.write_reg(
+                            Register::X(rd),
+                            (((rs1 as i128) * (rs2 as i128)) >> 64) as u64,
+                        )?;
+                    } // MULH
                     (0b010, 0) => self.write_reg(
                         Register::X(rd),
                         if self.read_reg(Register::X(rs2))? as i64
@@ -489,6 +509,12 @@ impl Emulator {
                             0
                         },
                     )?, // SLT
+                    (0b010, 0b0000001) => {
+                        let rs1 = sign_extend_128bit(63, self.read_reg(Register::X(rs1))? as u128);
+                        let rs2 = self.read_reg(Register::X(rs2))? as u128;
+
+                        self.write_reg(Register::X(rd), (rs1.wrapping_mul(rs2) >> 64) as u64)?;
+                    } // MULH
                     (0b011, 0) => self.write_reg(
                         Register::X(rd),
                         if self.read_reg(Register::X(rs2))? > self.read_reg(Register::X(rs1))? {
@@ -497,6 +523,12 @@ impl Emulator {
                             0
                         },
                     )?, // SLTU
+                    (0b011, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))? as u128;
+                        let rs2 = self.read_reg(Register::X(rs2))? as u128;
+
+                        self.write_reg(Register::X(rd), (rs1.wrapping_mul(rs2) >> 64) as u64)?;
+                    } // MULHU
                     (0b100, 0) => {
                         self.write_reg(
                             Register::X(rd),
@@ -580,6 +612,12 @@ impl Emulator {
                             ),
                         )?;
                     } // ADDW
+                    (0b000, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))? & 0xffffffff;
+                        let rs2 = self.read_reg(Register::X(rs2))? & 0xffffffff;
+
+                        self.write_reg(Register::X(rd), sign_extend(31, (rs1 * rs2) & 0xffffffff))?;
+                    } // MULW
                     (0b000, 0b0100000) => {
                         self.write_reg(
                             Register::X(rd),

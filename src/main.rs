@@ -85,6 +85,11 @@ fn main() {
         "rv64um-p-divu.bin",
         "rv64um-p-divuw.bin",
         "rv64um-p-divw.bin",
+        "rv64um-p-mul.bin",
+        "rv64um-p-mulh.bin",
+        "rv64um-p-mulhsu.bin",
+        "rv64um-p-mulhu.bin",
+        "rv64um-p-mulw.bin",
     ];
 
     run_tests(&mut emulator, "rv64um-p-*", &um_p_tests);
