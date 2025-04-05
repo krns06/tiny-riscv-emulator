@@ -301,6 +301,27 @@ impl Emulator {
                             self.read_reg(Register::X(rs1))? << (imm & 0x3f),
                         )?;
                     } // SLLI
+                    (0b010, _) => {
+                        self.write_reg(
+                            Register::X(rd),
+                            if sign_extend(11, imm) as i64 > self.read_reg(Register::X(rs1))? as i64
+                            {
+                                1
+                            } else {
+                                0
+                            },
+                        )?;
+                    } // SLTI
+                    (0b011, _) => {
+                        self.write_reg(
+                            Register::X(rd),
+                            if sign_extend(11, imm) > self.read_reg(Register::X(rs1))? {
+                                1
+                            } else {
+                                0
+                            },
+                        )?;
+                    } // SLTIU
                     (0b101, 0b000000) => {
                         self.write_reg(
                             Register::X(rd),
@@ -350,6 +371,35 @@ impl Emulator {
                             ),
                         )?;
                     } // ADDIW
+                    (0b001, 0) => {
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(
+                                31,
+                                (self.read_reg(Register::X(rs1))? << (imm & 0x1f)) & 0xffffffff,
+                            ),
+                        )?;
+                    } // SLL
+                    (0b101, 0) => {
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(
+                                31,
+                                (self.read_reg(Register::X(rs1))? & 0xffffffff) >> (imm & 0x1f)
+                                    & 0xffffffff,
+                            ),
+                        )?;
+                    } // SRLIW
+                    (0b101, 0b010000) => {
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(
+                                31 - (imm & 0x1f) as u8,
+                                ((self.read_reg(Register::X(rs1))? & 0xffffffff) >> (imm & 0x1f))
+                                    & 0xffffffff,
+                            ),
+                        )?;
+                    } // SRAIW
                     _ => return Err(IllegralInstruction),
                 }
             }
@@ -418,9 +468,48 @@ impl Emulator {
                         self.read_reg(Register::X(rs1))?
                             .wrapping_sub(self.read_reg(Register::X(rs2))?),
                     )?, // SUB
+                    (0b001, 0) => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))?
+                            << (self.read_reg(Register::X(rs2))? & 0x3f),
+                    )?, // SLL
+                    (0b010, 0) => self.write_reg(
+                        Register::X(rd),
+                        if self.read_reg(Register::X(rs2))? as i64
+                            > self.read_reg(Register::X(rs1))? as i64
+                        {
+                            1
+                        } else {
+                            0
+                        },
+                    )?, // SLT
+                    (0b011, 0) => self.write_reg(
+                        Register::X(rd),
+                        if self.read_reg(Register::X(rs2))? > self.read_reg(Register::X(rs1))? {
+                            1
+                        } else {
+                            0
+                        },
+                    )?, // SLTU
+                    (0b101, 0) => {
+                        let shift = self.read_reg(Register::X(rs2))? & 0x3f;
+
+                        self.write_reg(Register::X(rd), self.read_reg(Register::X(rs1))? >> shift)?;
+                    } // SRL
+                    (0b101, 0b0100000) => {
+                        let shift = self.read_reg(Register::X(rs2))? & 0x3f;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(
+                                63 - shift as u8,
+                                self.read_reg(Register::X(rs1))? >> shift,
+                            ),
+                        )?;
+                    } // SRA
                     (0b110, 0) => self.write_reg(
                         Register::X(rd),
-                        self.read_reg(Register::X(rs1))? | (self.read_reg(Register::X(rs2))?),
+                        self.read_reg(Register::X(rs1))? | self.read_reg(Register::X(rs2))?,
                     )?, // OR
                     (0b111, 0) => self.write_reg(
                         Register::X(rd),
@@ -438,7 +527,7 @@ impl Emulator {
                 let (rd, rs1, rs2, funct7) = extract_r_type(self.instruction);
 
                 match (funct3, funct7) {
-                    (0, 0) => {
+                    (0b000, 0) => {
                         self.write_reg(
                             Register::X(rd),
                             sign_extend(
@@ -449,6 +538,50 @@ impl Emulator {
                             ),
                         )?;
                     } // ADDW
+                    (0b000, 0b0100000) => {
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(
+                                31,
+                                self.read_reg(Register::X(rs1))?
+                                    .wrapping_sub(self.read_reg(Register::X(rs2))?)
+                                    & 0xffffffff,
+                            ),
+                        )?;
+                    } // ADDW
+                    (0b001, 0) => {
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(
+                                31,
+                                (self.read_reg(Register::X(rs1))?
+                                    << (self.read_reg(Register::X(rs2))? & 0x1f))
+                                    & 0xffffffff,
+                            ),
+                        )?;
+                    } // SLLW
+                    (0b101, 0) => {
+                        let shift = self.read_reg(Register::X(rs2))? & 0x1f;
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(
+                                31,
+                                ((self.read_reg(Register::X(rs1))? & 0xffffffff) >> shift)
+                                    & 0xffffffff,
+                            ),
+                        )?;
+                    } // SRLW
+                    (0b101, 0b0100000) => {
+                        let shift = self.read_reg(Register::X(rs2))? & 0x1f;
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(
+                                31 - shift as u8,
+                                ((self.read_reg(Register::X(rs1))? & 0xffffffff) >> shift)
+                                    & 0xffffffff,
+                            ),
+                        )?;
+                    } // SRAW
                     _ => return Err(IllegralInstruction),
                 }
             }
@@ -612,9 +745,9 @@ impl Emulator {
             eprintln!("PC: 0x{:016x}", self.pc,);
             self.fetch();
 
-            //if self.pc == 0x1b0 {
+            //if self.pc == 0x1a0 {
             //    self.show_regs();
-            //    panic!("0x1b0");
+            //    panic!("0x1a0");
             //}
 
             match self.exec() {
