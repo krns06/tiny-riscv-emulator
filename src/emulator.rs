@@ -322,6 +322,12 @@ impl Emulator {
                             },
                         )?;
                     } // SLTIU
+                    (0b100, _) => {
+                        self.write_reg(
+                            Register::X(rd),
+                            self.read_reg(Register::X(rs1))? ^ sign_extend(11, imm),
+                        )?;
+                    } // XORI
                     (0b101, 0b000000) => {
                         self.write_reg(
                             Register::X(rd),
@@ -491,6 +497,12 @@ impl Emulator {
                             0
                         },
                     )?, // SLTU
+                    (0b100, 0) => {
+                        self.write_reg(
+                            Register::X(rd),
+                            self.read_reg(Register::X(rs1))? ^ self.read_reg(Register::X(rs2))?,
+                        )?;
+                    } // XOR
                     (0b101, 0) => {
                         let shift = self.read_reg(Register::X(rs2))? & 0x3f;
 

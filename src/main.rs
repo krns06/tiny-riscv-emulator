@@ -60,6 +60,8 @@ fn main() {
         "rv64ui-p-sub.bin",
         "rv64ui-p-subw.bin",
         "rv64ui-p-sw.bin",
+        "rv64ui-p-xor.bin",
+        "rv64ui-p-xori.bin",
     ];
 
     for test in tests {
