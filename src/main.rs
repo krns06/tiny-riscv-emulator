@@ -1,4 +1,19 @@
 use tiny_riscv_emulator::emulator::Emulator;
+const TEST_DIR: &str = "tests/isa/flats";
+
+fn run_tests(emulator: &mut Emulator, name: &str, tests: &[&str]) {
+    eprintln!("[info]: start {}", name);
+    for test in tests {
+        emulator.load(format!("{}/{}", TEST_DIR, test)).unwrap();
+
+        emulator.run();
+
+        // gp(3)が1であることを確認する。
+        assert!(emulator.regs()[2] == 1);
+        println!("[info]: Test {} was successful.", test);
+    }
+    eprintln!("[info]: end {}", name);
+}
 
 fn main() {
     let mut emulator = Emulator::default();
@@ -6,8 +21,7 @@ fn main() {
     // メモリをなぜかスタックに固定で確保する実装になっているのでそれを
     // ヒープにするまで$cargo rでテストを行うことにする。
 
-    const TEST_DIR: &str = "tests/isa/flats";
-    let tests = [
+    let ui_p_tests = [
         "rv64ui-p-add.bin",
         "rv64ui-p-addi.bin",
         "rv64ui-p-addiw.bin",
@@ -64,13 +78,23 @@ fn main() {
         "rv64ui-p-xori.bin",
     ];
 
-    for test in tests {
-        emulator.load(format!("{}/{}", TEST_DIR, test)).unwrap();
+    run_tests(&mut emulator, "rv64ui-p-*", &ui_p_tests);
 
-        emulator.run();
+    let um_p_tests = [
+        "rv64um-p-div.bin",
+        "rv64um-p-divu.bin",
+        "rv64um-p-divuw.bin",
+        "rv64um-p-divw.bin",
+        "rv64um-p-mul.bin",
+        "rv64um-p-mulh.bin",
+        "rv64um-p-mulhsu.bin",
+        "rv64um-p-mulhu.bin",
+        "rv64um-p-mulw.bin",
+        "rv64um-p-rem.bin",
+        "rv64um-p-remu.bin",
+        "rv64um-p-remuw.bin",
+        "rv64um-p-remw.bin",
+    ];
 
-        // gp(3)が1であることを確認する。
-        assert!(emulator.regs()[2] == 1);
-        println!("[info]: Test {} was successful.", test);
-    }
+    run_tests(&mut emulator, "rv64um-p-*", &um_p_tests);
 }

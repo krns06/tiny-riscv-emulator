@@ -21,6 +21,12 @@ fn sign_extend(bit: u8, v: u64) -> u64 {
     (mask + v) ^ mask
 }
 
+fn sign_extend_128bit(bit: u8, v: u128) -> u128 {
+    let mask = (u128::MAX >> 1) ^ (2u128.pow(bit as u32) - 1);
+
+    (mask + v) ^ mask
+}
+
 fn extract_r_type(instruction: u32) -> (u8, u8, u8, u8) {
     let rd = (instruction >> 7) & 0x1f;
     let rs1 = (instruction >> 15) & 0x1f;
@@ -469,6 +475,11 @@ impl Emulator {
                         self.read_reg(Register::X(rs1))?
                             .wrapping_add(self.read_reg(Register::X(rs2))?),
                     )?, // ADD
+                    (0, 0b0000001) => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))?
+                            .wrapping_mul(self.read_reg(Register::X(rs2))?),
+                    )?, // MUL
                     (0, 0b0100000) => self.write_reg(
                         Register::X(rd),
                         self.read_reg(Register::X(rs1))?
@@ -479,6 +490,15 @@ impl Emulator {
                         self.read_reg(Register::X(rs1))?
                             << (self.read_reg(Register::X(rs2))? & 0x3f),
                     )?, // SLL
+                    (0b001, 0b0000001) => {
+                        let rs1 = sign_extend_128bit(63, self.read_reg(Register::X(rs1))? as u128);
+                        let rs2 = sign_extend_128bit(63, self.read_reg(Register::X(rs2))? as u128);
+
+                        self.write_reg(
+                            Register::X(rd),
+                            (((rs1 as i128) * (rs2 as i128)) >> 64) as u64,
+                        )?;
+                    } // MULH
                     (0b010, 0) => self.write_reg(
                         Register::X(rd),
                         if self.read_reg(Register::X(rs2))? as i64
@@ -489,6 +509,12 @@ impl Emulator {
                             0
                         },
                     )?, // SLT
+                    (0b010, 0b0000001) => {
+                        let rs1 = sign_extend_128bit(63, self.read_reg(Register::X(rs1))? as u128);
+                        let rs2 = self.read_reg(Register::X(rs2))? as u128;
+
+                        self.write_reg(Register::X(rd), (rs1.wrapping_mul(rs2) >> 64) as u64)?;
+                    } // MULH
                     (0b011, 0) => self.write_reg(
                         Register::X(rd),
                         if self.read_reg(Register::X(rs2))? > self.read_reg(Register::X(rs1))? {
@@ -497,17 +523,53 @@ impl Emulator {
                             0
                         },
                     )?, // SLTU
+                    (0b011, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))? as u128;
+                        let rs2 = self.read_reg(Register::X(rs2))? as u128;
+
+                        self.write_reg(Register::X(rd), (rs1.wrapping_mul(rs2) >> 64) as u64)?;
+                    } // MULHU
                     (0b100, 0) => {
                         self.write_reg(
                             Register::X(rd),
                             self.read_reg(Register::X(rs1))? ^ self.read_reg(Register::X(rs2))?,
                         )?;
                     } // XOR
+                    (0b100, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))?;
+                        let rs2 = self.read_reg(Register::X(rs2))?;
+
+                        // 符号付きの割り算
+                        // 符号のオーバーフローが起こった場合はrs1の値
+                        // 0で割り算する場合はすべてのbitが１になっている値
+                        // 以外は普通にわり算の値
+                        // をrdにセットする。
+
+                        self.write_reg(
+                            Register::X(rd),
+                            if rs1 == 1 << 63 && rs2 == !0 {
+                                rs1
+                            } else if rs2 == 0 {
+                                u64::MAX
+                            } else {
+                                (rs1 as i64 / rs2 as i64) as u64
+                            },
+                        )?;
+                    } // DIV
                     (0b101, 0) => {
                         let shift = self.read_reg(Register::X(rs2))? & 0x3f;
 
                         self.write_reg(Register::X(rd), self.read_reg(Register::X(rs1))? >> shift)?;
                     } // SRL
+                    (0b101, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))?;
+                        let rs2 = self.read_reg(Register::X(rs2))?;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            if rs2 == 0 { u64::MAX } else { rs1 / rs2 },
+                        )?;
+                    } // DIVU
                     (0b101, 0b0100000) => {
                         let shift = self.read_reg(Register::X(rs2))? & 0x3f;
 
@@ -523,10 +585,31 @@ impl Emulator {
                         Register::X(rd),
                         self.read_reg(Register::X(rs1))? | self.read_reg(Register::X(rs2))?,
                     )?, // OR
+                    (0b110, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))?;
+                        let rs2 = self.read_reg(Register::X(rs2))?;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            if rs1 == 1 << 63 && rs2 == !0 {
+                                0
+                            } else if rs2 == 0 {
+                                rs1
+                            } else {
+                                (rs1 as i64 % rs2 as i64) as u64
+                            },
+                        )?
+                    } // REM
                     (0b111, 0) => self.write_reg(
                         Register::X(rd),
                         self.read_reg(Register::X(rs1))? & self.read_reg(Register::X(rs2))?,
                     )?, // AND
+                    (0b111, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))?;
+                        let rs2 = self.read_reg(Register::X(rs2))?;
+
+                        self.write_reg(Register::X(rd), if rs2 == 0 { rs1 } else { rs1 % rs2 })?;
+                    } // REMU
                     _ => return Err(IllegralInstruction),
                 }
             }
@@ -550,6 +633,12 @@ impl Emulator {
                             ),
                         )?;
                     } // ADDW
+                    (0b000, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))? & 0xffffffff;
+                        let rs2 = self.read_reg(Register::X(rs2))? & 0xffffffff;
+
+                        self.write_reg(Register::X(rd), sign_extend(31, (rs1 * rs2) & 0xffffffff))?;
+                    } // MULW
                     (0b000, 0b0100000) => {
                         self.write_reg(
                             Register::X(rd),
@@ -572,6 +661,21 @@ impl Emulator {
                             ),
                         )?;
                     } // SLLW
+                    (0b100, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))? as i32;
+                        let rs2 = self.read_reg(Register::X(rs2))? as i32;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            if rs1 == i32::MIN && rs2 == !0 {
+                                rs1 as u64
+                            } else if rs2 == 0 {
+                                u64::MAX
+                            } else {
+                                (rs1 / rs2) as u64
+                            },
+                        )?;
+                    } // SLLW
                     (0b101, 0) => {
                         let shift = self.read_reg(Register::X(rs2))? & 0x1f;
                         self.write_reg(
@@ -583,6 +687,19 @@ impl Emulator {
                             ),
                         )?;
                     } // SRLW
+                    (0b101, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))?;
+                        let rs2 = self.read_reg(Register::X(rs2))?;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            if rs2 == 0 {
+                                u64::MAX
+                            } else {
+                                sign_extend(31, (rs1 / rs2) & 0xffffffff)
+                            },
+                        )?;
+                    } // DIVUW
                     (0b101, 0b0100000) => {
                         let shift = self.read_reg(Register::X(rs2))? & 0x1f;
                         self.write_reg(
@@ -594,6 +711,30 @@ impl Emulator {
                             ),
                         )?;
                     } // SRAW
+                    (0b110, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))? & 0xffffffff;
+                        let rs2 = self.read_reg(Register::X(rs2))? & 0xffffffff;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            if rs1 == 1 << 31 && rs2 == 0xffffffff {
+                                0
+                            } else if rs2 == 0 {
+                                sign_extend(31, rs1)
+                            } else {
+                                (rs1 as i32 % rs2 as i32) as u64
+                            },
+                        )?;
+                    } // REMW
+                    (0b111, 0b0000001) => {
+                        let rs1 = self.read_reg(Register::X(rs1))? & 0xffffffff;
+                        let rs2 = self.read_reg(Register::X(rs2))? & 0xffffffff;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(31, if rs2 == 0 { rs1 } else { rs1 % rs2 }),
+                        )?;
+                    } // REMUW
                     _ => return Err(IllegralInstruction),
                 }
             }
