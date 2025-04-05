@@ -22,6 +22,20 @@ fn main() {
         "rv64ui-p-bltu.bin",
         "rv64ui-p-bne.bin",
         "rv64ui-p-fence_i.bin",
+        "rv64ui-p-jal.bin",
+        "rv64ui-p-jalr.bin",
+        "rv64ui-p-lb.bin",
+        "rv64ui-p-lbu.bin",
+        "rv64ui-p-ld.bin",
+        "rv64ui-p-ld_st.bin",
+        "rv64ui-p-lh.bin",
+        "rv64ui-p-lhu.bin",
+        "rv64ui-p-lui.bin",
+        "rv64ui-p-lw.bin",
+        "rv64ui-p-lwu.bin",
+        "rv64ui-p-ma_data.bin",
+        "rv64ui-p-or.bin",
+        "rv64ui-p-ori.bin",
     ];
 
     for test in tests {
