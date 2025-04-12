@@ -97,6 +97,7 @@ pub struct Emulator {
     pc: u64,
     current_priv: Priv,
     instruction: u32,
+    reserved_memory_ranges: Vec<(usize, usize)>, // 予約されたメモリ領域を指定する。(begin, end)
 }
 
 impl Emulator {
@@ -172,12 +173,34 @@ impl Emulator {
         self.csr.write_csr(csr, value)
     }
 
-    fn check_misaligned(&self, address: u64) -> Result<()> {
-        if address % 4 == 0 {
+    fn check_misaligned_nbyte_misaligned(&self, address: u64, n: u64) -> Result<()> {
+        if address % n == 0 {
             Ok(())
         } else {
             Err(InstructionAddressMissaligned)
         }
+    }
+
+    // 4byteアライメントを確かめる関数
+    fn check_misaligned(&self, address: u64) -> Result<()> {
+        self.check_misaligned_nbyte_misaligned(address, 4)
+    }
+
+    // 予約されたメモリ領域を追加する関数
+    // LR.D/Wで使用
+    // range: (begin, end)
+    // 同じ範囲が与えられたらそれを削除してpushする。
+    // 一部が被る場合は前に保存していた領域を削除する。
+    fn push_reserved_memory_range(&mut self, range: (usize, usize)) {
+        self.reserved_memory_ranges
+            .retain(|r| range.1 < r.0 || range.0 > r.1);
+        self.reserved_memory_ranges.push(range);
+    }
+
+    // 予約されたメモリ領域を一つ取り出す関数
+    // SC.D/Wで使用
+    fn pop_reserved_memory_range(&mut self) -> Option<(usize, usize)> {
+        self.reserved_memory_ranges.pop()
     }
 
     // 命令を取り出す関数
@@ -461,6 +484,186 @@ impl Emulator {
                             &bytes,
                         )?;
                     } // SD
+                    _ => return Err(IllegralInstruction),
+                }
+            }
+            0b01011 => {
+                let (rd, rs1, rs2, funct7) = extract_r_type(self.instruction);
+
+                let addr = self.read_reg(Register::X(rs1))? as usize;
+
+                // PMAでアライメントは変更することができるらしい。
+
+                match funct3 {
+                    0b010 => {
+                        // 32bit版の場合は4バイトアライメント
+                        self.check_misaligned(addr as u64)?;
+
+                        if funct7 >> 2 == 0b00011 {
+                            // SC.W
+
+                            if let Some(range) = self.pop_reserved_memory_range() {
+                                // 予約領域が存在している場合
+
+                                if range.0 <= addr && range.1 >= addr + 4 {
+                                    // 予約領域内の場合はそのメモリ領域に書き込みを行い、rdに0を書き込む。
+                                    self.write_memory(
+                                        addr,
+                                        &(self.read_reg(Register::X(rs2))? as u32).to_le_bytes(),
+                                    )?;
+
+                                    self.write_reg(Register::X(rd), 0)?;
+                                } else {
+                                    // 上の条件に当てはまらない場合はrdに1を書き込むことにする。
+                                    self.write_reg(Register::X(rd), 1)?;
+                                }
+                            } else {
+                                // ここで二回同じコードを書いているがif-let chainが使えるようになったら一つで済むようになる。
+                                self.write_reg(Register::X(rd), 1)?;
+                            }
+                        } else {
+                            let v = u32::from_le_bytes(self.read_memory::<4>(addr)?);
+
+                            match funct7 >> 2 {
+                                0 => self.write_memory(
+                                    addr,
+                                    &(v.wrapping_add(self.read_reg(Register::X(rs2))? as u32))
+                                        .to_le_bytes(),
+                                )?, // AMOADD.W
+                                0b00001 => {
+                                    self.write_memory(
+                                        addr,
+                                        &(self.read_reg(Register::X(rs2))? as u32).to_le_bytes(),
+                                    )?;
+                                    self.write_reg(Register::X(rs2), v as u64)?;
+                                } // AMOSWAP.W
+                                0b00010 => {
+                                    self.write_reg(Register::X(rd), sign_extend(31, v as u64))?;
+                                    self.push_reserved_memory_range((addr, addr + 4));
+                                } // LR.W
+                                // 0b00011 => {} // SC.W 上に実装済み
+                                0b00100 => self.write_memory(
+                                    addr,
+                                    &(v ^ (self.read_reg(Register::X(rs2))? as u32)).to_le_bytes(),
+                                )?,
+                                0b01100 => self.write_memory(
+                                    addr,
+                                    &(v & (self.read_reg(Register::X(rs2))? as u32)).to_le_bytes(),
+                                )?, // AMOAND.W
+                                0b01000 => self.write_memory(
+                                    addr,
+                                    &(v | (self.read_reg(Register::X(rs2))? as u32)).to_le_bytes(),
+                                )?,
+                                0b10000 => {
+                                    let rs2_val = self.read_reg(Register::X(rs2))? as u32;
+
+                                    self.write_memory(
+                                        addr,
+                                        &(if rs2_val as i32 > v as i32 {
+                                            v
+                                        } else {
+                                            rs2_val
+                                        })
+                                        .to_le_bytes(),
+                                    )?;
+                                } // AMOMIN.W
+                                0b10100 => {
+                                    let rs2_val = self.read_reg(Register::X(rs2))? as u32;
+
+                                    self.write_memory(
+                                        addr,
+                                        &(if v as i32 > rs2_val as i32 {
+                                            v
+                                        } else {
+                                            rs2_val
+                                        })
+                                        .to_le_bytes(),
+                                    )?;
+                                } // AMOMAX.W
+                                0b11000 => self.write_memory(
+                                    addr,
+                                    &v.min(self.read_reg(Register::X(rs2))? as u32).to_le_bytes(),
+                                )?, // AMOMINU.W
+                                0b11100 => self.write_memory(
+                                    addr,
+                                    &v.max(self.read_reg(Register::X(rs2))? as u32).to_le_bytes(),
+                                )?, // AMOMAXU.W
+                                _ => return Err(IllegralInstruction),
+                            }
+
+                            self.write_reg(Register::X(rd), sign_extend(31, v as u64))?;
+                        }
+                    }
+                    0b011 => {
+                        // 64bit版の場合は8バイトアライメント
+                        self.check_misaligned_nbyte_misaligned(addr as u64, 8)?;
+
+                        let v = u64::from_le_bytes(self.read_memory::<8>(addr)?);
+
+                        match funct7 >> 2 {
+                            0 => self.write_memory(
+                                addr,
+                                &(v.wrapping_add(self.read_reg(Register::X(rs2))?)).to_le_bytes(),
+                            )?, // AMOADD.D
+                            0b00001 => {
+                                self.write_memory(
+                                    addr,
+                                    &self.read_reg(Register::X(rs2))?.to_le_bytes(),
+                                )?;
+                                self.write_reg(Register::X(rs2), v)?;
+                            } // AMOSWAP.D
+                            // 0b0011 => {} SC.Dを作るときはSC.Wを参考にする。
+                            0b00100 => self.write_memory(
+                                addr,
+                                &(v ^ self.read_reg(Register::X(rs2))?).to_le_bytes(),
+                            )?, // AMOXOR.D
+                            0b01100 => self.write_memory(
+                                addr,
+                                &(v & self.read_reg(Register::X(rs2))?).to_le_bytes(),
+                            )?, // AMOAND.D
+                            0b01000 => self.write_memory(
+                                addr,
+                                &(v | self.read_reg(Register::X(rs2))?).to_le_bytes(),
+                            )?, // AMOOR.D
+                            0b10000 => {
+                                let rs2_val = self.read_reg(Register::X(rs2))?;
+
+                                self.write_memory(
+                                    addr,
+                                    &(if rs2_val as i64 > v as i64 {
+                                        v
+                                    } else {
+                                        rs2_val
+                                    })
+                                    .to_le_bytes(),
+                                )?;
+                            } // AMOMIN.D
+                            0b10100 => {
+                                let rs2_val = self.read_reg(Register::X(rs2))?;
+
+                                self.write_memory(
+                                    addr,
+                                    &(if v as i64 > rs2_val as i64 {
+                                        v
+                                    } else {
+                                        rs2_val
+                                    })
+                                    .to_le_bytes(),
+                                )?;
+                            } // AMOMAX.D
+                            0b11000 => self.write_memory(
+                                addr,
+                                &v.min(self.read_reg(Register::X(rs2))?).to_le_bytes(),
+                            )?,
+                            0b11100 => self.write_memory(
+                                addr,
+                                &v.max(self.read_reg(Register::X(rs2))?).to_le_bytes(),
+                            )?, // AMOMAXU.D
+                            _ => return Err(IllegralInstruction),
+                        }
+
+                        self.write_reg(Register::X(rd), v)?;
+                    }
                     _ => return Err(IllegralInstruction),
                 }
             }
@@ -898,9 +1101,8 @@ impl Emulator {
             eprintln!("PC: 0x{:016x}", self.pc,);
             self.fetch();
 
-            //if self.pc == 0x1a0 {
+            //if self.pc >= 0x230 && self.pc <= 0x250 {
             //    self.show_regs();
-            //    panic!("0x1a0");
             //}
 
             match self.exec() {
@@ -956,5 +1158,12 @@ impl Emulator {
             eprintln!("x{:02}: 0x{:016x}", i + 1, reg);
         }
         eprintln!("---------- REGS ----------");
+    }
+
+    // riscv-testsが成功しているかどうかを確認する関数
+    // 本来は.tohostの0x1000を参照すべきだが
+    // ecallをまともに実装するまではgpで判定する。
+    pub fn check_riscv_tests_result(&self) -> bool {
+        self.regs[3 - 1] == 1
     }
 }
