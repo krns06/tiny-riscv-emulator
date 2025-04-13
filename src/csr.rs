@@ -24,6 +24,10 @@ impl CSR {
         self.current_priv = p;
     }
 
+    pub fn initialize_csr(&mut self) {
+        *self = CSR::default();
+    }
+
     // CSRを書き込む関数
     // 返り値はzero-extendされた値
     pub fn read_csr(&self, csr: u64) -> Result<u64> {

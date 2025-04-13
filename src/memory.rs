@@ -5,15 +5,9 @@ use std::{
     path::Path,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Memory<const MAX: usize> {
-    array: [u8; MAX],
-}
-
-impl<const MAX: usize> Default for Memory<MAX> {
-    fn default() -> Self {
-        Memory { array: [0; MAX] }
-    }
+    array: Vec<u8>,
 }
 
 impl<const MAX: usize> Memory<MAX> {
@@ -27,16 +21,13 @@ impl<const MAX: usize> Memory<MAX> {
         let file = File::open(filename)?;
         let mut reader = BufReader::new(file);
 
-        let mut buf = Vec::new();
+        self.array = vec![0; MAX];
 
-        let n = reader.read_to_end(&mut buf)?;
+        let n = reader.read(&mut self.array)?;
 
         if n > MAX {
             panic!("Error: The file size is too big or MAX is too small.");
         }
-
-        self.array[..n].copy_from_slice(&buf[..n]);
-        self.array[n..].fill(0);
 
         Ok(())
     }
@@ -85,13 +76,13 @@ impl<const MAX: usize> Memory<MAX> {
             self.array[address..].copy_from_slice(&values[..diff]);
             self.array[..diff].copy_from_slice(&values[diff..]);
         } else {
+            println!(
+                "size: 0x{:016x} MAX: 0x{:016x} len: {}",
+                address,
+                MAX,
+                self.array.len()
+            );
             self.array[address..address + size].copy_from_slice(values);
         }
-    }
-
-    // メモリの内容を表示する関数
-    // デバッグ用なので消す予定。
-    pub fn show_array(&self) {
-        println!("{:?}", &self.array[..100]);
     }
 }
