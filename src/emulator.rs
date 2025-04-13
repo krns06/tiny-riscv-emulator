@@ -108,10 +108,17 @@ impl Emulator {
         &mut self,
         filename: P,
     ) -> core::result::Result<(), Box<dyn Error>> {
+        self.initialize_regs();
+        self.csr.initialize_csr();
+
         self.memory.load(filename)?;
-        self.pc = 0;
 
         Ok(())
+    }
+
+    fn initialize_regs(&mut self) {
+        self.regs = [0; 31];
+        self.pc = 0;
     }
 
     // メモリを読み込むときに使用する関数
