@@ -81,11 +81,61 @@ fn extract_j_type(instruction: u32) -> (u8, u64) {
     (rd as u8, imm as u64)
 }
 
+// RVC RegisterからInteger Registerに変換する関数
+// 8以上のレジスタを与えられた場合はpanicを起こす。
+fn convert_from_c_reg_to_i(c_reg: u16) -> u8 {
+    if c_reg > 7 {
+        panic!("Error: Invalid RVC Register.");
+    }
+
+    c_reg as u8 + 8
+}
+
+fn extract_ci_type(instruction: u16) -> (u8, u64) {
+    let rd = (instruction >> 7) & 0x1f;
+    let imm = ((instruction >> 7) & 0x20) | ((instruction >> 2) & 0x1f);
+
+    (rd as u8, imm as u64)
+}
+
+fn extract_ciw_type(instruction: u16) -> (u8, u64) {
+    let rd = convert_from_c_reg_to_i((instruction >> 2) & 0x7);
+    let imm = (instruction >> 5) & 0xff;
+
+    (rd, imm as u64)
+}
+
+// CL: (rd, rs1, imm)
+// CS: (rs2, rs1, imm)
+fn extract_clcs_type(instruction: u16) -> (u8, u8, u64) {
+    let rd = convert_from_c_reg_to_i((instruction >> 2) & 0x7);
+    let rs1 = convert_from_c_reg_to_i((instruction >> 7) & 0x7);
+    let imm = (instruction >> 5) & 0x3;
+
+    (rd, rs1, imm as u64)
+}
+
+fn extract_cb_type(instruction: u16) -> (u8, u64) {
+    let rs1 = convert_from_c_reg_to_i((instruction >> 7) & 0x7);
+    let imm = ((instruction >> 5) & 0xe0) | ((instruction >> 2) & 0x1f);
+
+    (rs1, imm as u64)
+}
+
+fn calc_c_offset_5_3_2_6(imm: u64) -> u64 {
+    ((imm << 6) & 0x40) | ((imm << 1) & 0x38) | ((imm << 1) & 0x4)
+}
+
+fn calc_c_offset_5_3_7_6(imm: u64) -> u64 {
+    ((imm << 6) & 0xc0) | ((imm << 1) & 0x38)
+}
+
 // エミュレータがexecしたときにその命令が何であるかを伝える列挙体
 // jump系の命令だと命令後にpc+4をしなくて良くなるのでそれを伝えたりする。←これ以外の用途があるかはわからない。
 enum EmulatorFlag {
     Jump,
     Common,
+    ExeC, // C拡張の命令を実行した場合
     TestEcall,
 }
 
@@ -98,6 +148,8 @@ pub struct Emulator {
     current_priv: Priv,
     instruction: u32,
     reserved_memory_ranges: Vec<(usize, usize)>, // 予約されたメモリ領域を指定する。(begin, end)
+    c: bool,                                     // C拡張を有効にするかどうかのフラグ
+    c_instruction: u16,                          // C拡張の命令を格納
 }
 
 impl Emulator {
@@ -114,6 +166,10 @@ impl Emulator {
         self.memory.load(filename)?;
 
         Ok(())
+    }
+
+    pub fn set_c_extenstion(&mut self, enabled: bool) {
+        self.c = enabled;
     }
 
     fn initialize_regs(&mut self) {
@@ -189,8 +245,13 @@ impl Emulator {
     }
 
     // 4byteアライメントを確かめる関数
+    // C拡張の場合はミスアライメントの例外は発生しないためOk(())を返す。
     fn check_misaligned(&self, address: u64) -> Result<()> {
-        self.check_misaligned_nbyte_misaligned(address, 4)
+        if !self.c {
+            self.check_misaligned_nbyte_misaligned(address, 4)
+        } else {
+            Ok(())
+        }
     }
 
     // 予約されたメモリ領域を追加する関数
@@ -218,12 +279,429 @@ impl Emulator {
         self.instruction = u32::from_le_bytes(self.memory.read::<4>(self.pc as usize));
     }
 
+    // C拡張の形式の命令を実行する関数
+    fn c_exec(&mut self) -> Result<EmulatorFlag> {
+        self.c_instruction = self.instruction as u16;
+
+        // op
+        match self.c_instruction & 0x3 {
+            0b00 => {
+                // CL: (rd, rs1, imm)
+                // CS: (rs2, rs1, imm)
+                let (fr, sr, imm) = extract_clcs_type(self.c_instruction);
+
+                // funct3
+                match self.c_instruction >> 13 {
+                    0 => {
+                        let (rd, imm) = extract_ciw_type(self.c_instruction);
+
+                        if imm == 0 {
+                            // 予約されている。
+                            return Err(IllegralInstruction);
+                        }
+
+                        let nzuimm = ((imm & 0x3c) << 4)
+                            | ((imm & 0xc0) >> 2)
+                            | ((imm & 0x1) << 3)
+                            | ((imm & 0x2) << 1);
+                        self.write_reg(
+                            Register::X(rd),
+                            self.read_reg(Register::X(2))?.wrapping_add(nzuimm),
+                        )?;
+                    } // C.ADDI4SPN
+                    0b010 => {
+                        let offset = calc_c_offset_5_3_2_6(imm);
+
+                        let bytes = self.read_memory(
+                            self.read_reg(Register::X(sr))?.wrapping_add(offset) as usize,
+                        )?;
+
+                        self.write_reg(
+                            Register::X(fr),
+                            sign_extend(31, u32::from_le_bytes(bytes) as u64),
+                        )?;
+                    } //C.LW
+                    0b011 => {
+                        let offset = calc_c_offset_5_3_7_6(imm);
+                        let bytes = self.read_memory::<8>(
+                            self.read_reg(Register::X(sr))?.wrapping_add(offset) as usize,
+                        )?;
+
+                        self.write_reg(Register::X(fr), u64::from_le_bytes(bytes))?;
+                    } // C.LD
+                    0b110 => {
+                        let offset = calc_c_offset_5_3_2_6(imm);
+                        let bytes = (self.read_reg(Register::X(fr))? as u32).to_le_bytes();
+
+                        self.write_memory(
+                            self.read_reg(Register::X(sr))?.wrapping_add(offset) as usize,
+                            &bytes,
+                        )?;
+                    } // C.SW
+                    0b111 => {
+                        let offset = calc_c_offset_5_3_7_6(imm);
+                        let bytes = self.read_reg(Register::X(fr))?.to_le_bytes();
+
+                        self.write_memory(
+                            self.read_reg(Register::X(sr))?.wrapping_add(offset) as usize,
+                            &bytes,
+                        )?;
+                    } // C.SD
+                    _ => return Err(IllegralInstruction),
+                }
+            }
+            0b01 => {
+                let (rd, imm) = extract_ci_type(self.c_instruction);
+
+                let funct3 = self.c_instruction >> 13;
+
+                // funct3
+                match funct3 {
+                    0b000 => {
+                        if rd == 0 {
+                            // C.NOP
+                            // imm == 0の場合はNOPで以外のときはHINT？
+                            // 一旦HINTは無視して実装する。
+                        } else {
+                            // C.ADDI
+                            if imm == 0 {
+                                panic!("Error: Ths imm of C.ADDI is not zero.");
+                            }
+
+                            self.write_reg(
+                                Register::X(rd),
+                                self.read_reg(Register::X(rd))?
+                                    .wrapping_add(sign_extend(5, imm)),
+                            )?;
+                        }
+                    }
+                    0b001 => {
+                        if rd != 0 {
+                            self.write_reg(
+                                Register::X(rd),
+                                sign_extend(
+                                    31,
+                                    self.read_reg(Register::X(rd))?
+                                        .wrapping_add(sign_extend(5, imm))
+                                        & 0xffffffff,
+                                ),
+                            )?;
+                        } else {
+                            // rd=0は予約済み
+                            return Err(IllegralInstruction);
+                        }
+                    } // C.ADDIW
+                    0b010 => {
+                        if rd != 0 {
+                            self.write_reg(Register::X(rd), sign_extend(5, imm))?;
+                        } else {
+                            // rd=0の場合はHINTsをエンコードするらしい。
+                        }
+                    } // C.LI
+                    0b011 => {
+                        if rd == 0 {
+                            panic!("Error: x0 is not zero with op=0b01 funct3=0b011.");
+                        } else if rd == 2 {
+                            // C.ADDI16SP
+                            let nzimm = ((imm << 4) & 0x200)
+                                | ((imm << 6) & 0x180)
+                                | ((imm << 3) & 0x40)
+                                | ((imm << 5) & 0x20)
+                                | (imm & 0x10);
+
+                            self.write_reg(
+                                Register::X(2),
+                                self.read_reg(Register::X(2))?
+                                    .wrapping_add(sign_extend(9, nzimm)),
+                            )?;
+                        } else {
+                            // C.LUI
+                            if imm == 0 {
+                                panic!("Error: Ths imm of C.LUI is not zero.");
+                            }
+
+                            let nzimm = imm << 12;
+
+                            self.write_reg(Register::X(rd), sign_extend(17, nzimm))?;
+                        }
+                    }
+                    0b100 => {
+                        let funct2 = rd >> 3;
+                        let rd = convert_from_c_reg_to_i(rd as u16 & 0x7);
+
+                        match funct2 {
+                            0 => {
+                                if imm != 0 {
+                                    self.write_reg(
+                                        Register::X(rd),
+                                        self.read_reg(Register::X(rd))? >> imm,
+                                    )?;
+                                } else {
+                                    // imm=0の場合はHINTsをエンコードするらしい。
+                                }
+                            } // C.SRLI
+                            0b01 => {
+                                if imm != 0 {
+                                    self.write_reg(
+                                        Register::X(rd),
+                                        sign_extend(
+                                            63 - imm as u8,
+                                            self.read_reg(Register::X(rd))? >> imm,
+                                        ),
+                                    )?;
+                                } else {
+                                    // imm=0の場合はHINTsをエンコードするらしい。
+                                }
+                            } // C.SRAI
+                            0b10 => {
+                                self.write_reg(
+                                    Register::X(rd),
+                                    self.read_reg(Register::X(rd))? & sign_extend(5, imm),
+                                )?;
+                            } // C.ANDI
+                            0b11 => {
+                                let rs2 = convert_from_c_reg_to_i(imm as u16 & 0x7);
+
+                                // funct6[2], funct2
+                                match (imm >> 5, (imm >> 3) & 0x3) {
+                                    (0, 0) => {
+                                        self.write_reg(
+                                            Register::X(rd),
+                                            self.read_reg(Register::X(rd))?
+                                                .wrapping_sub(self.read_reg(Register::X(rs2))?),
+                                        )?;
+                                    } // C.SUB
+                                    (0, 0b01) => {
+                                        self.write_reg(
+                                            Register::X(rd),
+                                            self.read_reg(Register::X(rd))?
+                                                ^ self.read_reg(Register::X(rs2))?,
+                                        )?;
+                                    } // C.XOR
+                                    (0, 0b10) => {
+                                        self.write_reg(
+                                            Register::X(rd),
+                                            self.read_reg(Register::X(rd))?
+                                                | self.read_reg(Register::X(rs2))?,
+                                        )?;
+                                    } // C.OR
+                                    (0, 0b11) => {
+                                        self.write_reg(
+                                            Register::X(rd),
+                                            self.read_reg(Register::X(rd))?
+                                                & self.read_reg(Register::X(rs2))?,
+                                        )?;
+                                    } // C.AND
+                                    (0b1, 0) => {
+                                        self.write_reg(
+                                            Register::X(rd),
+                                            sign_extend(
+                                                31,
+                                                self.read_reg(Register::X(rd))?
+                                                    .wrapping_sub(self.read_reg(Register::X(rs2))?)
+                                                    & 0xffffffff,
+                                            ),
+                                        )?;
+                                    } // C.SUBW
+                                    (0b1, 0b01) => {
+                                        self.write_reg(
+                                            Register::X(rd),
+                                            sign_extend(
+                                                31,
+                                                self.read_reg(Register::X(rd))?
+                                                    .wrapping_add(self.read_reg(Register::X(rs2))?)
+                                                    & 0xffffffff,
+                                            ),
+                                        )?;
+                                    } // C.ADDW
+                                    _ => return Err(IllegralInstruction),
+                                }
+                            }
+                            _ => return Err(IllegralInstruction),
+                        }
+                    }
+                    0b101 => {
+                        let imm = (self.c_instruction >> 1) & 0xffe;
+                        let offset = (imm & 0xb40)
+                            | ((imm << 3) & 0x400)
+                            | ((imm << 2) & 0x80)
+                            | ((imm << 4) & 0x20)
+                            | ((imm >> 6) & 0x10)
+                            | ((imm >> 1) & 0xe);
+
+                        self.write_reg(
+                            Register::Pc,
+                            self.read_reg(Register::Pc)?
+                                .wrapping_add(sign_extend(11, offset as u64)),
+                        )?;
+
+                        return Ok(EmulatorFlag::Jump);
+                    } // C.J
+                    0b110 | 0b111 => {
+                        let (rs1, imm) = extract_cb_type(self.c_instruction);
+                        let offset = ((imm << 1) & 0x100)
+                            | ((imm << 3) & 0xc0)
+                            | ((imm << 5) & 0x20)
+                            | ((imm >> 2) & 0x18)
+                            | (imm & 0x6);
+
+                        let rs1 = self.read_reg(Register::X(rs1))?;
+
+                        // C.BEQZ or C.BNEZ
+                        if (funct3 == 0b110 && rs1 == 0) || (funct3 == 0b111 && rs1 != 0) {
+                            self.write_reg(
+                                Register::Pc,
+                                self.read_reg(Register::Pc)?
+                                    .wrapping_add(sign_extend(8, offset)),
+                            )?;
+                            return Ok(EmulatorFlag::Jump);
+                        }
+                    }
+                    _ => return Err(IllegralInstruction),
+                }
+            }
+            0b10 => {
+                let (rd, imm) = extract_ci_type(self.c_instruction);
+
+                match self.c_instruction >> 13 {
+                    0 => {
+                        if rd != 0 && imm != 0 {
+                            self.write_reg(
+                                Register::X(rd),
+                                self.read_reg(Register::X(rd))? << imm,
+                            )?;
+                        } else {
+                            // rd=0またはimm=0の場合はHINTsをエンコードするらしい。
+                        }
+                    } // C.SLLI
+                    0b010 => {
+                        if rd == 0 {
+                            // rd=0は予約済み
+                            return Err(IllegralInstruction);
+                        }
+
+                        let offset = ((imm << 6) & 0xc0) | (imm & 0x3c);
+
+                        let bytes = self.read_memory::<4>(
+                            self.read_reg(Register::X(2))?.wrapping_add(offset) as usize,
+                        )?;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(31, u32::from_le_bytes(bytes) as u64),
+                        )?;
+                    } // C.LWSP
+                    0b011 => {
+                        if rd == 0 {
+                            // rd=0は予約済み
+                            return Err(IllegralInstruction);
+                        }
+
+                        let offset = ((imm << 6) & 0xc0) | (imm & 0x3c);
+
+                        self.write_reg(
+                            Register::X(rd),
+                            u64::from_le_bytes(self.read_memory::<8>(
+                                self.read_reg(Register::X(2))?.wrapping_add(offset) as usize,
+                            )?),
+                        )?;
+                    } // C.LDSP
+                    0b100 => {
+                        let rs2 = imm as u8 & 0x1f;
+                        let funct4 = imm >> 5;
+
+                        if rd == 0 && rs2 == 0 && funct4 == 1 {
+                            // C.EBREAK
+                            return Err(IllegralInstruction);
+                        }
+
+                        if rs2 == 0 {
+                            // C.JR & C.JALR
+                            if rd == 0 {
+                                // rs1=0は予約済み
+                                return Err(IllegralInstruction);
+                            }
+
+                            if funct4 == 1 {
+                                // C.JALR
+                                self.write_reg(
+                                    Register::X(1),
+                                    self.read_reg(Register::Pc)?.wrapping_add(2),
+                                )?;
+                            }
+
+                            self.write_reg(Register::Pc, self.read_reg(Register::X(rd))? & !1)?;
+                            return Ok(EmulatorFlag::Jump);
+                        }
+
+                        if funct4 == 0 {
+                            // C.MV
+                            if rd == 0 {
+                                // rd=0の場合はHINTsをエンコードするらしい。
+                            } else {
+                                self.write_reg(Register::X(rd), self.read_reg(Register::X(rs2))?)?;
+                            }
+                        } else {
+                            // C.ADD
+                            if rd == 0 {
+                                // rd=0の場合はHINTsをエンコードするらしい。
+                            } else {
+                                self.write_reg(
+                                    Register::X(rd),
+                                    self.read_reg(Register::X(rd))?
+                                        .wrapping_add(self.read_reg(Register::X(rs2))?),
+                                )?;
+                            }
+                        }
+                    }
+                    0b110 => {
+                        let rs2 = (imm & 0x1f) as u8;
+                        let imm = (imm & 0x20) | rd as u64;
+                        let offset = ((imm << 6) & 0xc0) | (imm & 0x3c);
+
+                        let bytes = (self.read_reg(Register::X(rs2))? as u32).to_le_bytes();
+
+                        self.write_memory(
+                            self.read_reg(Register::X(2))?.wrapping_add(offset) as usize,
+                            &bytes,
+                        )?;
+                    } // C.SWSP
+                    0b111 => {
+                        let rs2 = (imm & 0x1f) as u8;
+                        let imm = (imm & 0x20) | rd as u64;
+                        let offset = ((imm << 6) & 0x7) | (imm & 0x38);
+
+                        self.write_memory(
+                            self.read_reg(Register::X(2))?.wrapping_add(offset) as usize,
+                            &self.read_reg(Register::X(rs2))?.to_le_bytes(),
+                        )?;
+                    } // C.SDSP
+                    _ => return Err(IllegralInstruction),
+                }
+            }
+            _ => return Err(IllegralInstruction),
+        }
+
+        Ok(EmulatorFlag::ExeC)
+    }
+
     // 命令を格納するバイト列から実行する命令を判定し命令を実行する関数
     // 例外が発生した場合は即座にErrに起こった例外に対応するException型の値を返す。
     fn exec(&mut self) -> Result<EmulatorFlag> {
         // instruction == 0の場合は不正な命令である。
+        if self.instruction == 0 {
+            return Err(IllegralInstruction);
+        }
+
+        // C拡張が有効の場合かつC拡張の命令の場合はc_execを実行する
+        if self.c && self.instruction & 0x3 < 3 {
+            return self.c_exec();
+        } else {
+            self.c_instruction = 0;
+        }
+
         // instruction & 0x3 != 3以外ならRV32もしくはRV64ではない可能性がある。
-        if self.instruction == 0 || self.instruction & 0x3 != 3 {
+        if self.instruction & 0x3 != 3 {
             return Err(IllegralInstruction);
         }
 
@@ -395,7 +873,8 @@ impl Emulator {
 
                 self.write_reg(
                     Register::X(rd),
-                    self.read_reg(Register::Pc)? + sign_extend(31, imm),
+                    self.read_reg(Register::Pc)?
+                        .wrapping_add(sign_extend(31, imm)),
                 )?;
             } // AUIPC
             0b00110 => {
@@ -1103,12 +1582,17 @@ impl Emulator {
         self.pc += 4;
     }
 
+    // C拡張を実行されたあとにpcを進ませる関数
+    fn c_progress_pc(&mut self) {
+        self.pc += 2;
+    }
+
     pub fn run(&mut self) {
         loop {
             eprintln!("PC: 0x{:016x}", self.pc,);
             self.fetch();
 
-            //if self.pc >= 0x230 && self.pc <= 0x250 {
+            //if self.pc >= 0x227c && self.pc <= 0x22c4 {
             //    self.show_regs();
             //}
 
@@ -1134,6 +1618,7 @@ impl Emulator {
 
                     match flag {
                         Common => self.progress_pc(),
+                        ExeC => self.c_progress_pc(),
                         Jump => {}
                         TestEcall => {
                             eprintln!("[info]: TestEcall occurred");

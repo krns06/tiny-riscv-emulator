@@ -17,4 +17,12 @@ fn run_tests(emulator: &mut Emulator, name: &str, tests: &[&str]) {
     eprintln!("[info]: end {}", name);
 }
 
-fn main() {}
+fn main() {
+    let mut emulator = Emulator::default();
+
+    emulator.set_c_extenstion(true);
+
+    let uc_tests = ["rv64uc-p-rvc.bin"];
+
+    run_tests(&mut emulator, "uc_tests", &uc_tests);
+}

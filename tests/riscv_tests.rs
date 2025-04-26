@@ -2,9 +2,7 @@ use tiny_riscv_emulator::emulator::Emulator;
 
 const TEST_DIR: &str = "tests/isa/flats";
 
-fn run_tests(tests: &[&str]) {
-    let mut emulator = Emulator::default();
-
+fn run_tests(mut emulator: Emulator, tests: &[&str]) {
     for test in tests {
         emulator.load(format!("{}/{}", TEST_DIR, test)).unwrap();
 
@@ -16,6 +14,8 @@ fn run_tests(tests: &[&str]) {
 
 #[test]
 fn test_ui_p() {
+    let emulator = Emulator::default();
+
     let ui_p_tests = [
         "rv64ui-p-add.bin",
         "rv64ui-p-addi.bin",
@@ -73,11 +73,13 @@ fn test_ui_p() {
         "rv64ui-p-xori.bin",
     ];
 
-    run_tests(&ui_p_tests);
+    run_tests(emulator, &ui_p_tests);
 }
 
 #[test]
 fn test_um_p() {
+    let emulator = Emulator::default();
+
     let um_p_tests = [
         "rv64um-p-div.bin",
         "rv64um-p-divu.bin",
@@ -94,11 +96,13 @@ fn test_um_p() {
         "rv64um-p-remw.bin",
     ];
 
-    run_tests(&um_p_tests);
+    run_tests(emulator, &um_p_tests);
 }
 
 #[test]
 fn test_ua_p() {
+    let emulator = Emulator::default();
+
     let ua_p_tests = [
         "rv64ua-p-amoadd_d.bin",
         "rv64ua-p-amoadd_w.bin",
@@ -121,5 +125,16 @@ fn test_ua_p() {
         "rv64ua-p-lrsc.bin",
     ];
 
-    run_tests(&ua_p_tests);
+    run_tests(emulator, &ua_p_tests);
+}
+
+#[test]
+fn test_uc_p_rvc() {
+    let mut emulator = Emulator::default();
+
+    emulator.set_c_extenstion(true);
+
+    let uc_p_rvc_tests = ["rv64uc-p-rvc.bin"];
+
+    run_tests(emulator, &uc_p_rvc_tests);
 }
