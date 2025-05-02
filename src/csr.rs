@@ -1,11 +1,11 @@
 use crate::{emulator::Emulator, exception::Exception::*, Result};
 
-pub(crate) const CSR_MEPC: u64 = 0x341;
 pub(crate) const CSR_MSTATUS: u64 = 0x300;
-
+pub(crate) const CSR_MISA: u64 = 0x301;
 pub(crate) const CSR_MEDELEG: u64 = 0x302;
 pub(crate) const CSR_MIDELEG: u64 = 0x303;
 pub(crate) const CSR_MTVEC: u64 = 0x305;
+pub(crate) const CSR_MEPC: u64 = 0x341;
 pub(crate) const CSR_MCAUSE: u64 = 0x342;
 pub(crate) const CSR_MTVAL: u64 = 0x343;
 
@@ -40,7 +40,7 @@ impl Default for Csr {
     fn default() -> Self {
         Self {
             mstatus: 0xa00000000,
-            misa: (1 << 63) | 0x1101, // (64bit,ima)
+            misa: (1 << 63) | 0x1105, // (64bit,ima)
             mtvec: 0,
             medeleg: 0,
             mideleg: 0,
@@ -62,13 +62,22 @@ impl Emulator {
         self.csr = Csr::default();
     }
 
-    pub fn set_c_extenstion(&mut self, enabled: bool) {
-        self.c = enabled;
-
+    // C拡張を有効/無効にする関数
+    // 有効にする場合は制限はないが、無効にする場合はプログラムの命令から呼ばれる想定
+    fn set_c_extenstion(&mut self, enabled: bool) {
         if enabled {
             self.csr.misa |= 4;
         } else {
-            self.csr.misa &= !4;
+            // 無効にする場合は次の命令がIALIGN(このエミュレータだと32)になっていない場合は変更しないらしい。
+            // 例外は起こらないっぽい
+            // 無効になっている場合に呼ばれる場合は考慮する必要がないので有効になっている場合に、次の命令がIALIGNになっているか確認し、なっていない場合は無効にしない。
+
+            if self
+                .check_misaligned_nbyte_misaligned(self.pc + 2, 4)
+                .is_ok()
+            {
+                self.csr.misa &= !4;
+            }
         }
     }
 
@@ -88,13 +97,14 @@ impl Emulator {
     pub(crate) fn read_raw_csr(&self, csr: u64) -> Result<u64> {
         match csr {
             CSR_MSTATUS => Ok(self.csr.mstatus), // mstatus
-            0x301 => Ok(self.csr.misa),          // misa
+            CSR_MISA => Ok(self.csr.misa),       // misa
             CSR_MEDELEG => Ok(self.csr.medeleg), // medeleg
             CSR_MIDELEG => Ok(self.csr.mideleg), // mideleg
             CSR_MTVEC => Ok(self.csr.mtvec),     // mtvec
             0x340 => Ok(self.csr.mscratch),      // mscratch
             CSR_MEPC => Ok(self.csr.mepc),       // mepc
             CSR_MCAUSE => Ok(self.csr.mcause),   // mcause
+            CSR_MTVAL => Ok(self.csr.mtval),     // mtval
             0xf11 => Ok(0xba5eba11),             // mvendorid(baseball)
             0xf12 => Ok(0x05500550),             // mvendorid(ossoosso)
             0xf13 => Ok(0x1),                    // mimpid(version 1)

@@ -2,8 +2,8 @@ use std::{error::Error, path::Path};
 
 use crate::{
     csr::{
-        Csr, CSR_MCAUSE, CSR_MEDELEG, CSR_MEPC, CSR_MIDELEG, CSR_MSTATUS, CSR_MSTATUS_MIE_MASK,
-        CSR_MSTATUS_MPIE_MASK, CSR_MSTATUS_MPP_MASK, CSR_MTVAL, CSR_MTVEC,
+        Csr, CSR_MCAUSE, CSR_MEDELEG, CSR_MEPC, CSR_MIDELEG, CSR_MISA, CSR_MSTATUS,
+        CSR_MSTATUS_MIE_MASK, CSR_MSTATUS_MPIE_MASK, CSR_MSTATUS_MPP_MASK, CSR_MTVAL, CSR_MTVEC,
     },
     exception::Exception::*,
     memory::Memory,
@@ -150,7 +150,6 @@ pub struct Emulator {
     pub(crate) current_priv: Priv,
     pub(crate) instruction: u32,
     pub(crate) reserved_memory_ranges: Vec<(usize, usize)>, // 予約されたメモリ領域を指定する。(begin, end)
-    pub(crate) c: bool,                                     // C拡張を有効にするかどうかのフラグ
     pub(crate) c_instruction: u16,                          // C拡張の命令を格納
 
     pub(crate) riscv_tests_finished: bool, // riscv-testsが終了したかどうかを表すフラグ
@@ -232,7 +231,7 @@ impl Emulator {
         Ok(())
     }
 
-    fn check_misaligned_nbyte_misaligned(&self, address: u64, n: u64) -> Result<()> {
+    pub(crate) fn check_misaligned_nbyte_misaligned(&self, address: u64, n: u64) -> Result<()> {
         if address % n == 0 {
             Ok(())
         } else {
@@ -242,8 +241,8 @@ impl Emulator {
 
     // 4byteアライメントを確かめる関数
     // C拡張の場合はミスアライメントの例外は発生しないためOk(())を返す。
-    fn check_misaligned(&self, address: u64) -> Result<()> {
-        if !self.c {
+    pub(crate) fn check_misaligned(&self, address: u64) -> Result<()> {
+        if !self.is_c_extension_enabled() {
             self.check_misaligned_nbyte_misaligned(address, 4)
         } else {
             Ok(())
@@ -690,7 +689,7 @@ impl Emulator {
         }
 
         // C拡張が有効の場合かつC拡張の命令の場合はc_execを実行する
-        if self.c && self.instruction & 0x3 < 3 {
+        if self.is_c_extension_enabled() && self.instruction & 0x3 < 3 {
             return self.c_exec();
         } else {
             self.c_instruction = 0;
@@ -1623,9 +1622,9 @@ impl Emulator {
             eprintln!("PC: 0x{:016x}", self.pc,);
             self.fetch();
 
-            //if self.pc >= 0x40c && self.pc <= 0x440 {
-            //    self.show_regs();
-            //}
+            if self.pc >= 0x292 && self.pc <= 0x296 {
+                self.show_regs();
+            }
 
             match self.exec() {
                 Err(e) => {
@@ -1652,13 +1651,7 @@ impl Emulator {
 
                         let mstatus = self.read_raw_csr(CSR_MSTATUS).unwrap();
                         let mie = (mstatus & CSR_MSTATUS_MIE_MASK) >> 3;
-                        let mtval = if self.c_instruction != 0 {
-                            self.c_instruction as u32
-                        } else {
-                            self.instruction
-                        };
                         self.write_csr(CSR_MEPC, self.pc).unwrap();
-                        self.write_csr(CSR_MTVAL, mtval as u64).unwrap();
                         self.write_csr(
                             CSR_MSTATUS,
                             (mstatus
@@ -1673,19 +1666,36 @@ impl Emulator {
                         self.write_csr(CSR_MCAUSE, e as u64).unwrap();
                     }
 
-                    let mtvec = self.read_raw_csr(CSR_MTVEC).unwrap();
-
                     match e {
-                        EnvironmentCallFromMMode | EnvironmentCallFromUMode => {
+                        EnvironmentCallFromMMode
+                        | EnvironmentCallFromUMode
+                        | InstructionAddressMissaligned => {
                             // 同期例外の場合はモードにかかわらずpcにBASEを設定する。
                             // 多分ハンドラがmcauseの値からどの処理を行うかを判定する感じかな。
+                            self.exception_direct_jump();
+                        }
+                        IllegralInstruction => {
+                            // 命令が0、C拡張が有効でなく、C命令の場合はとりあえず不正命令の処理を行う
+                            // それ場合は実装していない命令の可能性があるので一応panicにする。
+                            if (self.c_instruction == 0 && self.instruction == 0)
+                                || (!self.is_c_extension_enabled() && self.instruction & 0x3 != 3)
+                            {
+                                let mtval = if self.c_instruction != 0 {
+                                    self.c_instruction as u32
+                                } else {
+                                    self.instruction
+                                };
+                                self.write_csr(CSR_MTVAL, mtval as u64).unwrap();
 
-                            let next_pc = match mtvec & 0x3 {
-                                0 | 1 => mtvec & !0x3,
-                                _ => panic!("Error: the mode of mtvec is not implemented."),
-                            };
-
-                            self.write_reg(Register::Pc, next_pc).unwrap();
+                                self.exception_direct_jump();
+                            } else {
+                                let op = self.instruction & 0x7f;
+                                let funct3 = (self.instruction >> 12) & 0x7;
+                                panic!(
+                        "instruction: 0x{:08x} op: 0b{:07b} funct3: 0b{:03b}\nException: {:?}",
+                        self.instruction, op, funct3, e
+                    );
+                            }
                         }
                         _ => {
                             let op = self.instruction & 0x7f;
@@ -1708,6 +1718,17 @@ impl Emulator {
                 }
             }
         }
+    }
+
+    // C拡張が有効かどうかを確認する関数
+    pub fn is_c_extension_enabled(&self) -> bool {
+        (self.read_raw_csr(CSR_MISA).unwrap() & 0x4) != 0
+    }
+
+    pub fn exception_direct_jump(&mut self) {
+        let mtvec = self.read_raw_csr(CSR_MTVEC).unwrap();
+
+        self.write_reg(Register::Pc, mtvec & !0x3).unwrap();
     }
 
     pub fn show_regs(&self) {
