@@ -1,7 +1,10 @@
 use std::{error::Error, path::Path};
 
 use crate::{
-    csr::{CSR, CSR_MEPC},
+    csr::{
+        Csr, CSR_MCAUSE, CSR_MEDELEG, CSR_MEPC, CSR_MIDELEG, CSR_MSTATUS, CSR_MSTATUS_MIE_MASK,
+        CSR_MSTATUS_MPIE_MASK, CSR_MSTATUS_MPP_MASK, CSR_MTVAL, CSR_MTVEC,
+    },
     exception::Exception::*,
     memory::Memory,
     register::Register,
@@ -136,20 +139,22 @@ enum EmulatorFlag {
     Jump,
     Common,
     ExeC, // C拡張の命令を実行した場合
-    TestEcall,
 }
 
 #[derive(Default)]
 pub struct Emulator {
-    memory: Memory<MEMORY_SIZE>,
-    regs: [u64; 31],
-    csr: CSR,
-    pc: u64,
-    current_priv: Priv,
-    instruction: u32,
-    reserved_memory_ranges: Vec<(usize, usize)>, // 予約されたメモリ領域を指定する。(begin, end)
-    c: bool,                                     // C拡張を有効にするかどうかのフラグ
-    c_instruction: u16,                          // C拡張の命令を格納
+    pub(crate) memory: Memory<MEMORY_SIZE>,
+    pub(crate) regs: [u64; 31],
+    pub(crate) csr: Csr,
+    pub(crate) pc: u64,
+    pub(crate) current_priv: Priv,
+    pub(crate) instruction: u32,
+    pub(crate) reserved_memory_ranges: Vec<(usize, usize)>, // 予約されたメモリ領域を指定する。(begin, end)
+    pub(crate) c: bool,                                     // C拡張を有効にするかどうかのフラグ
+    pub(crate) c_instruction: u16,                          // C拡張の命令を格納
+
+    pub(crate) riscv_tests_finished: bool, // riscv-testsが終了したかどうかを表すフラグ
+    pub(crate) riscv_tests_exit_memory_address: usize, // riscv-testsが終了するメモリアドレス
 }
 
 impl Emulator {
@@ -161,15 +166,13 @@ impl Emulator {
         filename: P,
     ) -> core::result::Result<(), Box<dyn Error>> {
         self.initialize_regs();
-        self.csr.initialize_csr();
+        self.initialize_csr();
+
+        self.riscv_tests_finished = false;
 
         self.memory.load(filename)?;
 
         Ok(())
-    }
-
-    pub fn set_c_extenstion(&mut self, enabled: bool) {
-        self.c = enabled;
     }
 
     fn initialize_regs(&mut self) {
@@ -184,6 +187,10 @@ impl Emulator {
 
     // メモリを書き込むときに使用する関数
     fn write_memory(&mut self, address: usize, values: &[u8]) -> Result<()> {
+        if address == self.riscv_tests_exit_memory_address {
+            self.riscv_tests_finished = true;
+        }
+
         self.memory.write(address, values);
 
         Ok(())
@@ -223,17 +230,6 @@ impl Emulator {
         }
 
         Ok(())
-    }
-
-    // CSRを書き込む関数
-    // 返り値はzero-extendされた値
-    fn read_csr(&self, csr: u64) -> Result<u64> {
-        self.csr.read_csr(csr)
-    }
-
-    // CSRを書き込む関数
-    fn write_csr(&mut self, csr: u64, value: u64) -> Result<()> {
-        self.csr.write_csr(csr, value)
     }
 
     fn check_misaligned_nbyte_misaligned(&self, address: u64, n: u64) -> Result<()> {
@@ -1508,36 +1504,37 @@ impl Emulator {
                 match funct3 {
                     0b000 => {
                         match self.instruction {
-                            0x00000073 => {
-                                let op = self.instruction & 0x7f;
-                                let funct3 = (self.instruction >> 12) & 0x7;
-                                eprintln!(
-                                    "instruction: 0x{:08x} op: 0b{:07b} funct3: 0b{:03b}",
-                                    self.instruction, op, funct3
-                                );
-
-                                eprintln!("[warning]: ecall may not work properly.");
-
-                                // ecallをまともに実装していないがriscv-testsを行いため
-                                // ecallが起こったときにTestEcallを返してgpの値を確認するようにする。
-
-                                return Ok(EmulatorFlag::TestEcall);
-                            } //ECALL
+                            0x00000073 => match self.current_priv {
+                                Priv::M => return Err(EnvironmentCallFromMMode),
+                                Priv::S => return Err(EnvironmentCallFromSMode),
+                                Priv::U => return Err(EnvironmentCallFromUMode),
+                            }, //ECALL
                             0x30200073 => match self.current_priv {
                                 Priv::M => {
-                                    // 全くちゃんと実装していないので今度実装する。
-                                    // mstatusとか例外の扱いをちゃんと理解しないと実装しないほうが良さそう。
-                                    eprintln!("[warning]: mret may not work properly.");
+                                    let mstatus = self.read_raw_csr(CSR_MSTATUS)?;
 
-                                    // 多分MEPCは4byteアライメントされているからアライメントの例外は考えなくていい？
+                                    let mpp = (mstatus & CSR_MSTATUS_MPP_MASK) >> 11;
+                                    let mpie = (mstatus & CSR_MSTATUS_MPIE_MASK) >> 7;
+
+                                    let new_mstatus = (mstatus
+                                        & !CSR_MSTATUS_MIE_MASK
+                                        & !CSR_MSTATUS_MPP_MASK
+                                        & !(CSR_MSTATUS_MPIE_MASK))
+                                        | (mpie << 3)
+                                        | (1 << 7)
+                                        | ((Priv::U as u64) << 11);
+
+                                    self.write_csr(CSR_MSTATUS, new_mstatus)?;
                                     self.write_reg(Register::Pc, self.read_csr(CSR_MEPC)?)?;
+                                    self.current_priv = Priv::from(mpp);
+
                                     return Ok(EmulatorFlag::Jump);
-                                }
+                                } // MRET
                                 _ => {
                                     // Mモード以外で呼び出された場合は実装していない。
-                                    unimplemented!("mret need to be invoked in M mode.");
+                                    return Err(IllegralInstruction);
                                 }
-                            }, // mret
+                            }, // xRET
                             _ => return Err(IllegralInstruction),
                         }
                     }
@@ -1551,21 +1548,51 @@ impl Emulator {
                     } // CSRRW
                     0b010 => {
                         let csr = self.read_csr(imm)?;
+                        let rs1 = self.read_reg(Register::X(rs1))?;
 
                         self.write_reg(Register::X(rd), csr)?;
 
                         if rs1 != 0 {
-                            self.write_csr(csr, csr ^ self.read_reg(Register::X(rs1))?)?;
+                            self.write_csr(imm, csr | rs1)?;
                         }
                     } // CSRRS
+                    0b011 => {
+                        let csr = self.read_csr(imm)?;
+                        let rs1 = self.read_reg(Register::X(rs1))?;
+
+                        self.write_reg(Register::X(rd), csr)?;
+
+                        if rs1 != 0 {
+                            self.write_csr(imm, csr ^ rs1)?;
+                        }
+                    } // CSRRC
                     0b101 => {
                         let csr = if rd != 0 { self.read_csr(imm)? } else { 0 };
+
                         self.write_csr(imm, rs1 as u64)?;
 
                         if rd != 0 {
                             self.write_reg(Register::X(rd), csr)?;
                         }
                     } // CSRRWI
+                    0b110 => {
+                        let csr = self.read_csr(imm)?;
+
+                        self.write_reg(Register::X(rd), csr)?;
+
+                        if rs1 != 0 {
+                            self.write_csr(imm, csr | rs1 as u64)?;
+                        }
+                    } // CSRRSI
+                    0b111 => {
+                        let csr = self.read_csr(imm)?;
+
+                        self.write_reg(Register::X(rd), csr)?;
+
+                        if rs1 != 0 {
+                            self.write_csr(imm, csr ^ rs1 as u64)?;
+                        }
+                    } // CSRRCI
                     _ => return Err(IllegralInstruction),
                 }
             }
@@ -1589,29 +1616,86 @@ impl Emulator {
 
     pub fn run(&mut self) {
         loop {
+            if self.riscv_tests_finished {
+                break;
+            }
+
             eprintln!("PC: 0x{:016x}", self.pc,);
             self.fetch();
 
-            //if self.pc >= 0x227c && self.pc <= 0x22c4 {
+            //if self.pc >= 0x40c && self.pc <= 0x440 {
             //    self.show_regs();
             //}
 
             match self.exec() {
                 Err(e) => {
-                    match self.current_priv {
-                        Priv::M => {
-                            // MEPCへ例外がおこったアドレスを書き込む
-                            self.write_csr(CSR_MEPC, self.pc).unwrap();
-                        }
-                        _ => unimplemented!("The mechanism for writing the address where the exception occurred to the *EPC is not implemented."),
+                    use crate::exception::Exception::*;
+
+                    if self.read_raw_csr(CSR_MEDELEG).unwrap() != 0
+                        || self.read_raw_csr(CSR_MIDELEG).unwrap() != 0
+                    {
+                        // 移譲の実装はまだ行わない。
+                        panic!("Error: mideleg or medeleg is not implemented.");
                     }
 
-                    let op = self.instruction & 0x7f;
-                    let funct3 = (self.instruction >> 12) & 0x7;
-                    panic!(
+                    // 移譲を行った場合はSモード用のCSRを使用する。
+
+                    if e as u64 >> 63 == 1 {
+                        // 割り込みの実装はまだ行わない。
+                        // mstatusやmie,mipの実装はまだ
+                        panic!("Error: interrupts are not implemented.");
+                    } else {
+                        // 例外の処理
+
+                        let mpp = self.current_priv as u64;
+                        self.current_priv = Priv::M;
+
+                        let mstatus = self.read_raw_csr(CSR_MSTATUS).unwrap();
+                        let mie = (mstatus & CSR_MSTATUS_MIE_MASK) >> 3;
+                        let mtval = if self.c_instruction != 0 {
+                            self.c_instruction as u32
+                        } else {
+                            self.instruction
+                        };
+                        self.write_csr(CSR_MEPC, self.pc).unwrap();
+                        self.write_csr(CSR_MTVAL, mtval as u64).unwrap();
+                        self.write_csr(
+                            CSR_MSTATUS,
+                            (mstatus
+                                & !CSR_MSTATUS_MPP_MASK
+                                & !CSR_MSTATUS_MPIE_MASK
+                                & !CSR_MSTATUS_MIE_MASK)
+                                | (mpp << 11)
+                                | (mie << 7),
+                        )
+                        .unwrap();
+
+                        self.write_csr(CSR_MCAUSE, e as u64).unwrap();
+                    }
+
+                    let mtvec = self.read_raw_csr(CSR_MTVEC).unwrap();
+
+                    match e {
+                        EnvironmentCallFromMMode | EnvironmentCallFromUMode => {
+                            // 同期例外の場合はモードにかかわらずpcにBASEを設定する。
+                            // 多分ハンドラがmcauseの値からどの処理を行うかを判定する感じかな。
+
+                            let next_pc = match mtvec & 0x3 {
+                                0 | 1 => mtvec & !0x3,
+                                _ => panic!("Error: the mode of mtvec is not implemented."),
+                            };
+
+                            self.write_reg(Register::Pc, next_pc).unwrap();
+                        }
+                        _ => {
+                            let op = self.instruction & 0x7f;
+                            let funct3 = (self.instruction >> 12) & 0x7;
+                            panic!(
                         "instruction: 0x{:08x} op: 0b{:07b} funct3: 0b{:03b}\nException: {:?}",
                         self.instruction, op, funct3, e
                     );
+                        }
+                    }
                 }
                 Ok(flag) => {
                     use EmulatorFlag::*;
@@ -1620,26 +1704,10 @@ impl Emulator {
                         Common => self.progress_pc(),
                         ExeC => self.c_progress_pc(),
                         Jump => {}
-                        TestEcall => {
-                            eprintln!("[info]: TestEcall occurred");
-                            break;
-                        }
                     }
                 }
             }
         }
-    }
-
-    pub fn regs(&self) -> &[u64] {
-        &self.regs
-    }
-
-    pub fn pc(&self) -> u64 {
-        self.pc
-    }
-
-    pub fn memory(&self) -> &Memory<MEMORY_SIZE> {
-        &self.memory
     }
 
     pub fn show_regs(&self) {
@@ -1653,9 +1721,14 @@ impl Emulator {
     }
 
     // riscv-testsが成功しているかどうかを確認する関数
-    // 本来は.tohostの0x1000を参照すべきだが
-    // ecallをまともに実装するまではgpで判定する。
     pub fn check_riscv_tests_result(&self) -> bool {
-        self.regs[3 - 1] == 1
+        self.read_memory::<4>(self.riscv_tests_exit_memory_address)
+            .unwrap()
+            == [1, 0, 0, 0]
+    }
+
+    // riscv-testsが終了するメモリアドレスを指定する関数
+    pub fn set_riscv_tests_exit_memory_address(&mut self, address: usize) {
+        self.riscv_tests_exit_memory_address = address;
     }
 }
