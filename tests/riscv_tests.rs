@@ -140,8 +140,6 @@ fn test_ua_p() {
 fn test_uc_p_rvc() {
     let mut emulator = Emulator::default();
 
-    emulator.set_c_extenstion(true);
-
     let uc_p_rvc_tests = ["rv64uc-p-rvc.bin"];
 
     for test in uc_p_rvc_tests {

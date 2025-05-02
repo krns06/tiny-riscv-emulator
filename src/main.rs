@@ -25,8 +25,15 @@ fn run_test(emulator: &mut Emulator, test: &str, riscv_tests_exit_memory_address
 fn main() {
     let mut emulator = Emulator::default();
 
-    emulator.set_c_extenstion(true);
-    let um_tests = ["rv64mi-p-csr.bin"];
+    let um_tests = [
+        "rv64mi-p-csr.bin",
+        "rv64mi-p-illegal.bin",
+        "rv64mi-p-ld-misaligned.bin",
+        "rv64mi-p-lh-misaligned.bin",
+        "rv64mi-p-lw-misaligned.bin",
+        "rv64mi-p-ma_addr.bin",
+        "rv64mi-p-ma_fetch.bin",
+    ];
 
     let name = "um_tests";
 
