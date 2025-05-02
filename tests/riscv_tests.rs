@@ -2,19 +2,18 @@ use tiny_riscv_emulator::emulator::Emulator;
 
 const TEST_DIR: &str = "tests/isa/flats";
 
-fn run_tests(mut emulator: Emulator, tests: &[&str]) {
-    for test in tests {
-        emulator.load(format!("{}/{}", TEST_DIR, test)).unwrap();
+fn run_test(emulator: &mut Emulator, test: &str, riscv_tests_exit_memory_address: usize) {
+    emulator.load(format!("{}/{}", TEST_DIR, test)).unwrap();
+    emulator.set_riscv_tests_exit_memory_address(riscv_tests_exit_memory_address);
 
-        emulator.run();
+    emulator.run();
 
-        assert!(emulator.check_riscv_tests_result());
-    }
+    assert!(emulator.check_riscv_tests_result());
 }
 
 #[test]
 fn test_ui_p() {
-    let emulator = Emulator::default();
+    let mut emulator = Emulator::default();
 
     let ui_p_tests = [
         "rv64ui-p-add.bin",
@@ -73,12 +72,17 @@ fn test_ui_p() {
         "rv64ui-p-xori.bin",
     ];
 
-    run_tests(emulator, &ui_p_tests);
+    for test in ui_p_tests {
+        match test {
+            "rv64ui-p-ld_st.bin" | "rv64ui-p-ma_data.bin" => run_test(&mut emulator, test, 0x2000),
+            _ => run_test(&mut emulator, test, 0x1000),
+        }
+    }
 }
 
 #[test]
 fn test_um_p() {
-    let emulator = Emulator::default();
+    let mut emulator = Emulator::default();
 
     let um_p_tests = [
         "rv64um-p-div.bin",
@@ -96,12 +100,14 @@ fn test_um_p() {
         "rv64um-p-remw.bin",
     ];
 
-    run_tests(emulator, &um_p_tests);
+    for test in um_p_tests {
+        run_test(&mut emulator, test, 0x1000);
+    }
 }
 
 #[test]
 fn test_ua_p() {
-    let emulator = Emulator::default();
+    let mut emulator = Emulator::default();
 
     let ua_p_tests = [
         "rv64ua-p-amoadd_d.bin",
@@ -125,7 +131,9 @@ fn test_ua_p() {
         "rv64ua-p-lrsc.bin",
     ];
 
-    run_tests(emulator, &ua_p_tests);
+    for test in ua_p_tests {
+        run_test(&mut emulator, test, 0x1000);
+    }
 }
 
 #[test]
@@ -136,5 +144,7 @@ fn test_uc_p_rvc() {
 
     let uc_p_rvc_tests = ["rv64uc-p-rvc.bin"];
 
-    run_tests(emulator, &uc_p_rvc_tests);
+    for test in uc_p_rvc_tests {
+        run_test(&mut emulator, test, 0x3000);
+    }
 }
