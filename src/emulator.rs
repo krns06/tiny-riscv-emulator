@@ -5,7 +5,7 @@ use crate::{
         Csr, CSR_MCAUSE, CSR_MEDELEG, CSR_MEPC, CSR_MIDELEG, CSR_MISA, CSR_MSTATUS,
         CSR_MSTATUS_MIE_MASK, CSR_MSTATUS_MPIE_MASK, CSR_MSTATUS_MPP_MASK, CSR_MTVAL, CSR_MTVEC,
     },
-    exception::Exception::*,
+    exception::Exception::{self, *},
     memory::Memory,
     register::Register,
     Priv, Result,
@@ -267,8 +267,6 @@ impl Emulator {
     }
 
     // 命令を取り出す関数
-    // 暗黙的なメモリ読み込みはいくつか定義されているものを除き、例外は発生しない。
-    // 現在読んでいる仕様書の部分ではfetchに相当する部分について特に明記されていないので現在のところは例外が起こらない想定とする。
     // run以外から呼んではいけない。
     fn fetch(&mut self) {
         self.instruction = u32::from_le_bytes(self.memory.read::<4>(self.pc as usize));
@@ -1527,6 +1525,8 @@ impl Emulator {
                                     self.write_reg(Register::Pc, self.read_csr(CSR_MEPC)?)?;
                                     self.current_priv = Priv::from(mpp);
 
+                                    println!("current_priv: {:?}", self.current_priv);
+
                                     return Ok(EmulatorFlag::Jump);
                                 } // MRET
                                 _ => {
@@ -1613,6 +1613,84 @@ impl Emulator {
         self.pc += 2;
     }
 
+    fn handle_exception(&mut self, e: Exception) {
+        use crate::exception::Exception::*;
+
+        println!("EXCEPTION: {:?}", e);
+
+        if self.read_raw_csr(CSR_MEDELEG).unwrap() != 0
+            || self.read_raw_csr(CSR_MIDELEG).unwrap() != 0
+        {
+            // 移譲の実装はまだ行わない。
+            panic!("Error: mideleg or medeleg is not implemented.");
+        }
+
+        // 移譲を行った場合はSモード用のCSRを使用する。
+
+        if e as u64 >> 63 == 1 {
+            // 割り込みの実装はまだ行わない。
+            // mstatusやmie,mipの実装はまだ
+            panic!("Error: interrupts are not implemented.");
+        } else {
+            // 例外の処理
+
+            let mpp = self.current_priv as u64;
+            self.current_priv = Priv::M;
+
+            let mstatus = self.read_raw_csr(CSR_MSTATUS).unwrap();
+            let mie = (mstatus & CSR_MSTATUS_MIE_MASK) >> 3;
+            self.write_csr(CSR_MEPC, self.pc).unwrap();
+            self.write_csr(
+                CSR_MSTATUS,
+                (mstatus & !CSR_MSTATUS_MPP_MASK & !CSR_MSTATUS_MPIE_MASK & !CSR_MSTATUS_MIE_MASK)
+                    | (mpp << 11)
+                    | (mie << 7),
+            )
+            .unwrap();
+
+            self.write_csr(CSR_MCAUSE, e as u64).unwrap();
+        }
+
+        match e {
+            EnvironmentCallFromMMode | EnvironmentCallFromUMode | InstructionAddressMissaligned => {
+                // 同期例外の場合はモードにかかわらずpcにBASEを設定する。
+                // 多分ハンドラがmcauseの値からどの処理を行うかを判定する感じかな。
+                self.exception_direct_jump();
+            }
+            IllegralInstruction => {
+                // 命令が0、C拡張が有効でなく、C命令の場合はとりあえず不正命令の処理を行う
+                // それ場合は実装していない命令の可能性があるので一応panicにする。
+                if (self.c_instruction == 0 && self.instruction == 0)
+                    || (!self.is_c_extension_enabled() && self.instruction & 0x3 != 3)
+                {
+                    let mtval = if self.c_instruction != 0 {
+                        self.c_instruction as u32
+                    } else {
+                        self.instruction
+                    };
+                    self.write_csr(CSR_MTVAL, mtval as u64).unwrap();
+
+                    self.exception_direct_jump();
+                } else {
+                    let op = self.instruction & 0x7f;
+                    let funct3 = (self.instruction >> 12) & 0x7;
+                    panic!(
+                        "instruction: 0x{:08x} op: 0b{:07b} funct3: 0b{:03b}\nException: {:?}",
+                        self.instruction, op, funct3, e
+                    );
+                }
+            }
+            _ => {
+                let op = self.instruction & 0x7f;
+                let funct3 = (self.instruction >> 12) & 0x7;
+                panic!(
+                    "instruction: 0x{:08x} op: 0b{:07b} funct3: 0b{:03b}\nException: {:?}",
+                    self.instruction, op, funct3, e
+                );
+            }
+        }
+    }
+
     pub fn run(&mut self) {
         loop {
             if self.riscv_tests_finished {
@@ -1622,91 +1700,12 @@ impl Emulator {
             eprintln!("PC: 0x{:016x}", self.pc,);
             self.fetch();
 
-            if self.pc >= 0x292 && self.pc <= 0x296 {
-                self.show_regs();
-            }
+            //if self.pc >= 0x292 && self.pc <= 0x296 {
+            //    self.show_regs();
+            //}
 
             match self.exec() {
-                Err(e) => {
-                    use crate::exception::Exception::*;
-
-                    if self.read_raw_csr(CSR_MEDELEG).unwrap() != 0
-                        || self.read_raw_csr(CSR_MIDELEG).unwrap() != 0
-                    {
-                        // 移譲の実装はまだ行わない。
-                        panic!("Error: mideleg or medeleg is not implemented.");
-                    }
-
-                    // 移譲を行った場合はSモード用のCSRを使用する。
-
-                    if e as u64 >> 63 == 1 {
-                        // 割り込みの実装はまだ行わない。
-                        // mstatusやmie,mipの実装はまだ
-                        panic!("Error: interrupts are not implemented.");
-                    } else {
-                        // 例外の処理
-
-                        let mpp = self.current_priv as u64;
-                        self.current_priv = Priv::M;
-
-                        let mstatus = self.read_raw_csr(CSR_MSTATUS).unwrap();
-                        let mie = (mstatus & CSR_MSTATUS_MIE_MASK) >> 3;
-                        self.write_csr(CSR_MEPC, self.pc).unwrap();
-                        self.write_csr(
-                            CSR_MSTATUS,
-                            (mstatus
-                                & !CSR_MSTATUS_MPP_MASK
-                                & !CSR_MSTATUS_MPIE_MASK
-                                & !CSR_MSTATUS_MIE_MASK)
-                                | (mpp << 11)
-                                | (mie << 7),
-                        )
-                        .unwrap();
-
-                        self.write_csr(CSR_MCAUSE, e as u64).unwrap();
-                    }
-
-                    match e {
-                        EnvironmentCallFromMMode
-                        | EnvironmentCallFromUMode
-                        | InstructionAddressMissaligned => {
-                            // 同期例外の場合はモードにかかわらずpcにBASEを設定する。
-                            // 多分ハンドラがmcauseの値からどの処理を行うかを判定する感じかな。
-                            self.exception_direct_jump();
-                        }
-                        IllegralInstruction => {
-                            // 命令が0、C拡張が有効でなく、C命令の場合はとりあえず不正命令の処理を行う
-                            // それ場合は実装していない命令の可能性があるので一応panicにする。
-                            if (self.c_instruction == 0 && self.instruction == 0)
-                                || (!self.is_c_extension_enabled() && self.instruction & 0x3 != 3)
-                            {
-                                let mtval = if self.c_instruction != 0 {
-                                    self.c_instruction as u32
-                                } else {
-                                    self.instruction
-                                };
-                                self.write_csr(CSR_MTVAL, mtval as u64).unwrap();
-
-                                self.exception_direct_jump();
-                            } else {
-                                let op = self.instruction & 0x7f;
-                                let funct3 = (self.instruction >> 12) & 0x7;
-                                panic!(
-                        "instruction: 0x{:08x} op: 0b{:07b} funct3: 0b{:03b}\nException: {:?}",
-                        self.instruction, op, funct3, e
-                    );
-                            }
-                        }
-                        _ => {
-                            let op = self.instruction & 0x7f;
-                            let funct3 = (self.instruction >> 12) & 0x7;
-                            panic!(
-                        "instruction: 0x{:08x} op: 0b{:07b} funct3: 0b{:03b}\nException: {:?}",
-                        self.instruction, op, funct3, e
-                    );
-                        }
-                    }
-                }
+                Err(e) => self.handle_exception(e),
                 Ok(flag) => {
                     use EmulatorFlag::*;
 
@@ -1725,7 +1724,7 @@ impl Emulator {
         (self.read_raw_csr(CSR_MISA).unwrap() & 0x4) != 0
     }
 
-    pub fn exception_direct_jump(&mut self) {
+    pub(crate) fn exception_direct_jump(&mut self) {
         let mtvec = self.read_raw_csr(CSR_MTVEC).unwrap();
 
         self.write_reg(Register::Pc, mtvec & !0x3).unwrap();

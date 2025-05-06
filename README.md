@@ -10,5 +10,7 @@
 - [x] riscv-testsのrv64um-p-*を通す。
 - [x] riscv-testsのrv64ua-p-*を通す。
 - [x] riscv-testsのrv64uc-p-rvcを通す。
-- [ ] riscv-testsのrv64mi-p-*を通す。
+- [x] riscv-testsのrv64mi-p-*(breakpoint, sbreak, instret_overflow, zicntr, pmpaddrを除く)を通す。
 - [ ] riscv-testsのrv64si-p-*を通す。
+- [ ] xv6を動かす。
+- [ ] Linuxを動かす。

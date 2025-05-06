@@ -33,6 +33,11 @@ fn main() {
         "rv64mi-p-lw-misaligned.bin",
         "rv64mi-p-ma_addr.bin",
         "rv64mi-p-ma_fetch.bin",
+        "rv64mi-p-mcsr.bin",
+        "rv64mi-p-sd-misaligned.bin",
+        "rv64mi-p-sh-misaligned.bin",
+        "rv64mi-p-sw-misaligned.bin",
+        "rv64mi-p-scall.bin",
     ];
 
     let name = "um_tests";
