@@ -149,10 +149,10 @@ impl Emulator {
                     return Err(IllegralInstruction);
                 }
 
-                eprint_not_work("satp");
+                eprint_not_working("satp");
             } // satp
             CSR_MSTATUS => {
-                if value & 0x8000_000a_007f_e640 != 0 {
+                if value & 0x8000_0005_007f_e640 != 0 {
                     // 下の条件を満たす場合は一旦エラーを出すようにする。
                     // * xBEがbig endian(1)
                     // * VSやFS、XSに対して書き込みがある場合
@@ -160,7 +160,7 @@ impl Emulator {
                     // * ハイパバイザー関連のパラメータ
                     // * xXLが64bit以外(00, 11)
                     eprintln!(
-                        "[warning]: The value(0b{:b}) of writing mstatus is not support.",
+                        "[warning]: The value(0x{:016x}) of writing mstatus is not support.",
                         value
                     );
                     return Err(IllegralInstruction);
@@ -230,15 +230,15 @@ impl Emulator {
             } // mip
             0x3a0 => {
                 self.csr.pmpcfg0 = value;
-                eprint_not_work("pmpcfg0");
+                eprint_not_working("pmpcfg0");
             } // pmpcfg0
             0x3b0 => {
                 self.csr.pmpaddr0 = value & 0x3ffffffffffff;
-                eprint_not_work("pmpaddr0");
+                eprint_not_working("pmpaddr0");
             } // pmpaddr0
             0x744 => {
                 self.csr.mnstatus = value & 0x8;
-                eprint_not_work("mnstatus");
+                eprint_not_working("mnstatus");
             } // mnstatus
             0xf14 => {} // mhartid
             _ => return Err(IllegralInstruction),
@@ -248,6 +248,6 @@ impl Emulator {
     }
 }
 
-fn eprint_not_work(name: &str) {
+fn eprint_not_working(name: &str) {
     eprintln!("[warning]: {} may not work properly.", name);
 }
