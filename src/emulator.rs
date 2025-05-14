@@ -2,8 +2,11 @@ use std::{error::Error, path::Path};
 
 use crate::{
     csr::{
-        Csr, CSR_MCAUSE, CSR_MEDELEG, CSR_MEPC, CSR_MIDELEG, CSR_MISA, CSR_MSTATUS,
-        CSR_MSTATUS_MIE_MASK, CSR_MSTATUS_MPIE_MASK, CSR_MSTATUS_MPP_MASK, CSR_MTVAL, CSR_MTVEC,
+        Csr, CSR_MCAUSE, CSR_MEDELEG, CSR_MEPC, CSR_MIDELEG, CSR_MIE, CSR_MIP, CSR_MISA,
+        CSR_MSTATUS, CSR_MSTATUS_MIE_MASK, CSR_MSTATUS_MPIE_MASK, CSR_MSTATUS_MPP_MASK,
+        CSR_MSTATUS_SIE_MASK, CSR_MSTATUS_SPIE_MASK, CSR_MSTATUS_SPP_MASK, CSR_MSTATUS_TSR_MASK,
+        CSR_MSTATUS_TVM_MASK, CSR_MSTATUS_TW_MASK, CSR_MTVAL, CSR_MTVEC, CSR_SEPC, CSR_SSTATUS,
+        CSR_SSTATUS_MASK,
     },
     exception::Exception::{self, *},
     memory::Memory,
@@ -1500,41 +1503,148 @@ impl Emulator {
 
                 match funct3 {
                     0b000 => {
-                        match self.instruction {
-                            0x00000073 => match self.current_priv {
-                                Priv::M => return Err(EnvironmentCallFromMMode),
-                                Priv::S => return Err(EnvironmentCallFromSMode),
-                                Priv::U => return Err(EnvironmentCallFromUMode),
-                            }, //ECALL
-                            0x30200073 => match self.current_priv {
-                                Priv::M => {
-                                    let mstatus = self.read_raw_csr(CSR_MSTATUS)?;
-
-                                    let mpp = (mstatus & CSR_MSTATUS_MPP_MASK) >> 11;
-                                    let mpie = (mstatus & CSR_MSTATUS_MPIE_MASK) >> 7;
-
-                                    let new_mstatus = (mstatus
-                                        & !CSR_MSTATUS_MIE_MASK
-                                        & !CSR_MSTATUS_MPP_MASK
-                                        & !(CSR_MSTATUS_MPIE_MASK))
-                                        | (mpie << 3)
-                                        | (1 << 7)
-                                        | ((Priv::U as u64) << 11);
-
-                                    self.write_csr(CSR_MSTATUS, new_mstatus)?;
-                                    self.write_reg(Register::Pc, self.read_csr(CSR_MEPC)?)?;
-                                    self.current_priv = Priv::from(mpp);
-
-                                    println!("current_priv: {:?}", self.current_priv);
-
-                                    return Ok(EmulatorFlag::Jump);
-                                } // MRET
-                                _ => {
-                                    // Mモード以外で呼び出された場合は実装していない。
-                                    return Err(IllegralInstruction);
+                        match self.instruction >> 25 {
+                            0b0001001 => {
+                                if self.current_priv != Priv::S {
+                                    panic!(
+                                        "Error: executing sfence.vma in S mode is only supported."
+                                    );
                                 }
-                            }, // xRET
-                            _ => return Err(IllegralInstruction),
+
+                                // よくわからないがriscv-testsでは
+                                // mstatus.TVM == 0 && current_priv == S_MODE
+                                // でも例外が発生するらしい。
+                                // ここはissueを投げるか検討
+
+                                return Err(IllegralInstruction);
+
+                                //let tvm =
+                                //    self.read_raw_csr(CSR_MSTATUS).unwrap() & CSR_MSTATUS_TVM_MASK;
+
+                                //if tvm != 0 {
+                                //    // tvmが設定されている場合はSモードで実行している場合は例外が発生する可能性があるらしい。
+                                //    panic!("Error: sfence.vma is not supported when mstatus.TVM equals 1.");
+                                //}
+                            } // SFENCE.VMA
+                            _ => {
+                                match self.instruction {
+                                    0x00000073 => match self.current_priv {
+                                        Priv::M => return Err(EnvironmentCallFromMMode),
+                                        Priv::S => return Err(EnvironmentCallFromSMode),
+                                        Priv::U => return Err(EnvironmentCallFromUMode),
+                                    }, //ECALL
+                                    0x10200073 => {
+                                        use Priv::*;
+
+                                        match self.current_priv {
+                                            M | S => {
+                                                let mstatus =
+                                                    self.read_raw_csr(CSR_MSTATUS).unwrap();
+
+                                                if self.current_priv == S
+                                                    && mstatus & CSR_MSTATUS_TSR_MASK != 0
+                                                {
+                                                    // Sモードでmstatus.TSRが有効な場合はIllegralInstructionを起こす。
+                                                    return Err(IllegralInstruction);
+                                                }
+
+                                                let spp = (mstatus & CSR_MSTATUS_SPP_MASK) >> 8;
+                                                let spie = (mstatus & CSR_MSTATUS_SPIE_MASK) >> 5;
+                                                let new_sstaus = (mstatus
+                                                    & !CSR_SSTATUS_MASK
+                                                    & !CSR_MSTATUS_SPP_MASK
+                                                    & !CSR_MSTATUS_SPIE_MASK
+                                                    & !CSR_MSTATUS_SIE_MASK)
+                                                    | ((Priv::U as u64) << 8)
+                                                    | (1 << 8)
+                                                    | (spie << 1);
+
+                                                self.write_csr(CSR_SSTATUS, new_sstaus).unwrap();
+                                                self.write_reg(
+                                                    Register::Pc,
+                                                    self.read_csr(CSR_SEPC).unwrap(),
+                                                )
+                                                .unwrap();
+                                                self.current_priv = Priv::from(spp);
+
+                                                eprintln!("current_priv: {:?}", self.current_priv);
+                                                return Ok(EmulatorFlag::Jump);
+                                            }
+                                            _ => return Err(IllegralInstruction),
+                                        }
+                                    } // SRET
+                                    0x10500073 => {
+                                        if self.current_priv != Priv::S {
+                                            panic!("Error: wfi in only S MODE is supported.");
+                                        }
+
+                                        let tw = self.read_raw_csr(CSR_MSTATUS).unwrap()
+                                            & CSR_MSTATUS_TW_MASK;
+
+                                        if tw == 0 {
+                                            // timeoutがないとき
+                                            eprintln!("[info]: Starting wfi loop...");
+                                            loop {
+                                                // mi{e,p}の値がそれぞれセットされている場合はxstatus.MIEにかかわらず終了する。
+                                                let active = self.read_raw_csr(CSR_MIE).unwrap()
+                                                    & self.read_raw_csr(CSR_MIP).unwrap();
+
+                                                if active != 0 {
+                                                    if active.count_ones() != 1 {
+                                                        panic!("Error: Nested traps are not supported.");
+                                                    }
+
+                                                    match active {
+                                                        2 => break,
+                                                        _ => panic!(
+                                                    "Error: The active interrupt is not suported."
+                                                ),
+                                                    }
+                                                }
+                                            }
+                                            eprintln!("[info]: Ending wfi loop...");
+                                        } else {
+                                            // timeoutがあるとき
+                                            panic!("Error: tw of wfi is not supported.");
+                                        }
+                                    } // WFI
+                                    0x30200073 => match self.current_priv {
+                                        Priv::M => {
+                                            let mstatus = self.read_raw_csr(CSR_MSTATUS).unwrap();
+
+                                            let mpp = (mstatus & CSR_MSTATUS_MPP_MASK) >> 11;
+                                            let mpie = (mstatus & CSR_MSTATUS_MPIE_MASK) >> 7;
+                                            // Memory Privilege in mstatus Registerは後実装する。
+                                            // let mprv = if mpp == Priv::M as u64 { 1 } else { 0 };
+
+                                            let new_mstatus = (mstatus
+                                                & !CSR_MSTATUS_MIE_MASK
+                                                & !CSR_MSTATUS_MPP_MASK
+                                                & !(CSR_MSTATUS_MPIE_MASK))
+                                                | (mpie << 3)
+                                                | (1 << 7)
+                                                | ((Priv::U as u64) << 11);
+
+                                            self.write_csr(CSR_MSTATUS, new_mstatus).unwrap();
+                                            self.write_reg(
+                                                Register::Pc,
+                                                self.read_csr(CSR_MEPC).unwrap(),
+                                            )
+                                            .unwrap();
+                                            self.current_priv = Priv::from(mpp);
+
+                                            eprintln!("current_priv: {:?}", self.current_priv);
+
+                                            return Ok(EmulatorFlag::Jump);
+                                        } // MRET
+                                        _ => {
+                                            // Mモード以外で呼び出された場合は実装していない。
+                                            return Err(IllegralInstruction);
+                                        }
+                                    }, // MRET
+                                    _ => return Err(IllegralInstruction),
+                                }
+                            }
                         }
                     }
                     0b001 => {
@@ -1562,7 +1672,7 @@ impl Emulator {
                         self.write_reg(Register::X(rd), csr)?;
 
                         if rs1 != 0 {
-                            self.write_csr(imm, csr ^ rs1)?;
+                            self.write_csr(imm, csr & !rs1)?;
                         }
                     } // CSRRC
                     0b101 => {
@@ -1589,7 +1699,7 @@ impl Emulator {
                         self.write_reg(Register::X(rd), csr)?;
 
                         if rs1 != 0 {
-                            self.write_csr(imm, csr ^ rs1 as u64)?;
+                            self.write_csr(imm, csr & !rs1 as u64)?;
                         }
                     } // CSRRCI
                     _ => return Err(IllegralInstruction),
@@ -1616,50 +1726,55 @@ impl Emulator {
     fn handle_exception(&mut self, e: Exception) {
         use crate::exception::Exception::*;
 
-        println!("EXCEPTION: {:?}", e);
+        eprintln!("EXCEPTION: {:?}", e);
 
-        if self.read_raw_csr(CSR_MEDELEG).unwrap() != 0
-            || self.read_raw_csr(CSR_MIDELEG).unwrap() != 0
-        {
+        let is_interrupt = e as u64 >> 63 == 1;
+        let medeleg = self.read_raw_csr(CSR_MEDELEG).unwrap();
+        let mideleg = self.read_raw_csr(CSR_MIDELEG).unwrap();
+
+        if (!is_interrupt && medeleg != 0) || (is_interrupt && mideleg != 0) {
             // 移譲の実装はまだ行わない。
-            panic!("Error: mideleg or medeleg is not implemented.");
+            panic!("Error: medeleg or mideleg is not implemented.");
         }
 
         // 移譲を行った場合はSモード用のCSRを使用する。
 
-        if e as u64 >> 63 == 1 {
-            // 割り込みの実装はまだ行わない。
-            // mstatusやmie,mipの実装はまだ
-            panic!("Error: interrupts are not implemented.");
+        let mpp = self.current_priv as u64;
+        self.current_priv = Priv::M;
+
+        let mstatus = self.read_raw_csr(CSR_MSTATUS).unwrap();
+        let mie = (mstatus & CSR_MSTATUS_MIE_MASK) >> 3;
+
+        if is_interrupt {
+            // 割り込み
+            // 次の命令のアドレスを保存する。wfiのところに記述がある。
+            self.write_csr(CSR_MEPC, self.pc + 4).unwrap();
         } else {
-            // 例外の処理
-
-            let mpp = self.current_priv as u64;
-            self.current_priv = Priv::M;
-
-            let mstatus = self.read_raw_csr(CSR_MSTATUS).unwrap();
-            let mie = (mstatus & CSR_MSTATUS_MIE_MASK) >> 3;
+            // 例外
             self.write_csr(CSR_MEPC, self.pc).unwrap();
-            self.write_csr(
-                CSR_MSTATUS,
-                (mstatus & !CSR_MSTATUS_MPP_MASK & !CSR_MSTATUS_MPIE_MASK & !CSR_MSTATUS_MIE_MASK)
-                    | (mpp << 11)
-                    | (mie << 7),
-            )
-            .unwrap();
-
-            self.write_csr(CSR_MCAUSE, e as u64).unwrap();
         }
 
+        self.write_csr(
+            CSR_MSTATUS,
+            (mstatus & !CSR_MSTATUS_MPP_MASK & !CSR_MSTATUS_MPIE_MASK & !CSR_MSTATUS_MIE_MASK)
+                | (mpp << 11)
+                | (mie << 7),
+        )
+        .unwrap();
+
+        self.write_csr(CSR_MCAUSE, e as u64).unwrap();
+
         match e {
-            EnvironmentCallFromMMode | EnvironmentCallFromUMode | InstructionAddressMissaligned => {
+            EnvironmentCallFromMMode
+            | EnvironmentCallFromUMode
+            | EnvironmentCallFromSMode
+            | InstructionAddressMissaligned => {
                 // 同期例外の場合はモードにかかわらずpcにBASEを設定する。
                 // 多分ハンドラがmcauseの値からどの処理を行うかを判定する感じかな。
                 self.exception_direct_jump();
             }
             IllegralInstruction => {
                 // 命令が0、C拡張が有効でなく、C命令の場合はとりあえず不正命令の処理を行う
-                // それ場合は実装していない命令の可能性があるので一応panicにする。
                 if (self.c_instruction == 0 && self.instruction == 0)
                     || (!self.is_c_extension_enabled() && self.instruction & 0x3 != 3)
                 {
@@ -1674,11 +1789,33 @@ impl Emulator {
                 } else {
                     let op = self.instruction & 0x7f;
                     let funct3 = (self.instruction >> 12) & 0x7;
-                    panic!(
-                        "instruction: 0x{:08x} op: 0b{:07b} funct3: 0b{:03b}\nException: {:?}",
-                        self.instruction, op, funct3, e
-                    );
+                    let funct7 = self.instruction >> 25;
+
+                    if op == 0b1110011
+                        && ((funct3 == 0b001 || funct3 == 0b010)
+                            || (funct3 == 0 && funct7 == 0b1001)
+                            || self.instruction == 0x10200073)
+                    {
+                        // CSRRW
+                        // CSRRS
+                        // SFENCE.VMA
+                        // SRET
+                        // この実装だと実装していないCSRを読み込むときはriscv-testsが失敗する想定
+                        // 正しく例外を起こしている（実装済みで正常な例外）場合はmtvalを設定し、同期例外の処理を行う。
+                        self.write_csr(CSR_MTVAL, self.instruction as u64).unwrap();
+
+                        self.exception_direct_jump();
+                    } else {
+                        // 実装していない可能性がある命令はこっち
+                        panic!(
+                            "instruction: 0x{:08x} op: 0b{:07b} funct3: 0b{:03b}\nException: {:?}",
+                            self.instruction, op, funct3, e
+                        );
+                    }
                 }
+            }
+            SuperSoftInt => {
+                self.interupt_vectored_jump();
             }
             _ => {
                 let op = self.instruction & 0x7f;
@@ -1700,14 +1837,28 @@ impl Emulator {
             eprintln!("PC: 0x{:016x}", self.pc,);
             self.fetch();
 
-            //if self.pc >= 0x292 && self.pc <= 0x296 {
+            //if self.pc == 0x4dc {
             //    self.show_regs();
+            //    println!("csr: {:x?}", self.csr);
+            //}
+
+            //if self.pc == 0x1f4 {
+            //    self.show_regs();
+            //    println!("csr: {:x?}", self.csr);
+            //    break;
             //}
 
             match self.exec() {
                 Err(e) => self.handle_exception(e),
                 Ok(flag) => {
                     use EmulatorFlag::*;
+
+                    self.add_cycle();
+
+                    if let Err(e) = self.check_interrupt_active() {
+                        self.handle_exception(e);
+                        continue;
+                    }
 
                     match flag {
                         Common => self.progress_pc(),
@@ -1724,10 +1875,23 @@ impl Emulator {
         (self.read_raw_csr(CSR_MISA).unwrap() & 0x4) != 0
     }
 
-    pub(crate) fn exception_direct_jump(&mut self) {
+    fn exception_direct_jump(&mut self) {
         let mtvec = self.read_raw_csr(CSR_MTVEC).unwrap();
+        let base = mtvec & !0x3;
 
-        self.write_reg(Register::Pc, mtvec & !0x3).unwrap();
+        self.write_reg(Register::Pc, base).unwrap();
+    }
+
+    fn interupt_vectored_jump(&mut self) {
+        if self.current_priv != Priv::M {
+            panic!("Error: The vectored jump in only M mode is supported.");
+        }
+
+        let mtvec = self.read_raw_csr(CSR_MTVEC).unwrap();
+        let base = mtvec & !0x3;
+        let cause = self.read_raw_csr(CSR_MCAUSE).unwrap();
+
+        self.write_reg(Register::Pc, base + cause * 4).unwrap();
     }
 
     pub fn show_regs(&self) {

@@ -7,4 +7,6 @@ pub enum Exception {
     EnvironmentCallFromUMode = 8,
     EnvironmentCallFromSMode = 9,
     EnvironmentCallFromMMode = 11,
+
+    SuperSoftInt = 1 << 63 | 1,
 }
