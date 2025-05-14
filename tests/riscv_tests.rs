@@ -148,10 +148,10 @@ fn test_uc_p_rvc() {
 }
 
 #[test]
-fn test_um_p_rvc() {
+fn test_mi_p() {
     let mut emulator = Emulator::default();
 
-    let um_tests = [
+    let mi_tests = [
         "rv64mi-p-csr.bin",
         "rv64mi-p-illegal.bin",
         "rv64mi-p-ld-misaligned.bin",
@@ -166,7 +166,7 @@ fn test_um_p_rvc() {
         "rv64mi-p-scall.bin",
     ];
 
-    for test in um_tests {
+    for test in mi_tests {
         run_test(&mut emulator, test, 0x1000);
     }
 }
