@@ -170,3 +170,19 @@ fn test_mi_p() {
         run_test(&mut emulator, test, 0x1000);
     }
 }
+
+#[test]
+fn test_si_p() {
+    let mut emulator = Emulator::default();
+
+    let si_tests = [
+        "rv64si-p-csr.bin",
+        "rv64si-p-ma_fetch.bin",
+        "rv64si-p-scall.bin",
+        "rv64si-p-wfi.bin",
+    ];
+
+    for test in si_tests {
+        run_test(&mut emulator, test, 0x1000);
+    }
+}
