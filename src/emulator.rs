@@ -5,8 +5,8 @@ use crate::{
         Csr, CSR_MCAUSE, CSR_MEDELEG, CSR_MEPC, CSR_MIDELEG, CSR_MIE, CSR_MIP, CSR_MISA,
         CSR_MSTATUS, CSR_MSTATUS_MIE_MASK, CSR_MSTATUS_MPIE_MASK, CSR_MSTATUS_MPP_MASK,
         CSR_MSTATUS_SIE_MASK, CSR_MSTATUS_SPIE_MASK, CSR_MSTATUS_SPP_MASK, CSR_MSTATUS_TSR_MASK,
-        CSR_MSTATUS_TVM_MASK, CSR_MSTATUS_TW_MASK, CSR_MTVAL, CSR_MTVEC, CSR_SEPC, CSR_SSTATUS,
-        CSR_SSTATUS_MASK,
+        CSR_MSTATUS_TVM_MASK, CSR_MSTATUS_TW_MASK, CSR_MTVAL, CSR_MTVEC, CSR_SCAUSE, CSR_SEPC,
+        CSR_SSTATUS, CSR_SSTATUS_MASK, CSR_STVAL, CSR_STVEC,
     },
     exception::Exception::{self, *},
     memory::Memory,
@@ -1731,38 +1731,65 @@ impl Emulator {
         let is_interrupt = e as u64 >> 63 == 1;
         let medeleg = self.read_raw_csr(CSR_MEDELEG).unwrap();
         let mideleg = self.read_raw_csr(CSR_MIDELEG).unwrap();
-
-        if (!is_interrupt && medeleg != 0) || (is_interrupt && mideleg != 0) {
-            // 移譲の実装はまだ行わない。
-            panic!("Error: medeleg or mideleg is not implemented.");
-        }
-
-        // 移譲を行った場合はSモード用のCSRを使用する。
-
-        let mpp = self.current_priv as u64;
-        self.current_priv = Priv::M;
-
-        let mstatus = self.read_raw_csr(CSR_MSTATUS).unwrap();
-        let mie = (mstatus & CSR_MSTATUS_MIE_MASK) >> 3;
-
-        if is_interrupt {
-            // 割り込み
-            // 次の命令のアドレスを保存する。wfiのところに記述がある。
-            self.write_csr(CSR_MEPC, self.pc + 4).unwrap();
+        let cause = if is_interrupt {
+            e as u64 & !(1 << 63)
         } else {
-            // 例外
-            self.write_csr(CSR_MEPC, self.pc).unwrap();
+            e as u64
+        };
+
+        if self.current_priv != Priv::M
+            && ((!is_interrupt && (medeleg >> cause) & 0x1 != 0)
+                || (is_interrupt && (mideleg >> cause) & 0x1 != 0))
+        {
+            // 委譲
+            let spp = self.current_priv as u64;
+            self.current_priv = Priv::S;
+
+            let sstatus = self.read_raw_csr(CSR_SSTATUS).unwrap();
+            let spie = (sstatus & CSR_MSTATUS_SIE_MASK) >> 1;
+
+            let sepc = if is_interrupt { self.pc + 4 } else { self.pc };
+            self.write_csr(CSR_SEPC, sepc).unwrap();
+
+            let next_sstatus =
+                sstatus & !CSR_MSTATUS_SPP_MASK & !CSR_MSTATUS_SPIE_MASK & !CSR_MSTATUS_SIE_MASK
+                    | (spp << 8)
+                    | (spie << 5);
+            self.write_csr(CSR_SSTATUS, next_sstatus).unwrap();
+
+            self.write_csr(CSR_SCAUSE, e as u64).unwrap();
+        } else {
+            // 移譲を行った場合はSモード用のCSRを使用する。
+
+            let mpp = self.current_priv as u64;
+            self.current_priv = Priv::M;
+
+            let mstatus = self.read_raw_csr(CSR_MSTATUS).unwrap();
+            let mpie = (mstatus & CSR_MSTATUS_MIE_MASK) >> 3;
+
+            if is_interrupt {
+                // 割り込み
+                // 次の命令のアドレスを保存する。wfiのところに記述がある。
+                self.write_csr(CSR_MEPC, self.pc + 4).unwrap();
+            } else {
+                // 例外
+                self.write_csr(CSR_MEPC, self.pc).unwrap();
+            }
+
+            let next_mstatus =
+                (mstatus & !CSR_MSTATUS_MPP_MASK & !CSR_MSTATUS_MPIE_MASK & !CSR_MSTATUS_MIE_MASK)
+                    | (mpp << 11)
+                    | (mpie << 7);
+            self.write_csr(CSR_MSTATUS, next_mstatus).unwrap();
+
+            self.write_csr(CSR_MCAUSE, e as u64).unwrap();
         }
 
-        self.write_csr(
-            CSR_MSTATUS,
-            (mstatus & !CSR_MSTATUS_MPP_MASK & !CSR_MSTATUS_MPIE_MASK & !CSR_MSTATUS_MIE_MASK)
-                | (mpp << 11)
-                | (mie << 7),
-        )
-        .unwrap();
-
-        self.write_csr(CSR_MCAUSE, e as u64).unwrap();
+        let xtvec = if self.current_priv == Priv::M {
+            self.read_raw_csr(CSR_MTVEC).unwrap()
+        } else {
+            self.read_raw_csr(CSR_STVEC).unwrap()
+        };
 
         match e {
             EnvironmentCallFromMMode
@@ -1771,21 +1798,26 @@ impl Emulator {
             | InstructionAddressMissaligned => {
                 // 同期例外の場合はモードにかかわらずpcにBASEを設定する。
                 // 多分ハンドラがmcauseの値からどの処理を行うかを判定する感じかな。
-                self.exception_direct_jump();
+                self.exception_direct_jump(xtvec);
             }
             IllegralInstruction => {
                 // 命令が0、C拡張が有効でなく、C命令の場合はとりあえず不正命令の処理を行う
                 if (self.c_instruction == 0 && self.instruction == 0)
                     || (!self.is_c_extension_enabled() && self.instruction & 0x3 != 3)
                 {
-                    let mtval = if self.c_instruction != 0 {
+                    let xtval = if self.c_instruction != 0 {
                         self.c_instruction as u32
                     } else {
                         self.instruction
                     };
-                    self.write_csr(CSR_MTVAL, mtval as u64).unwrap();
 
-                    self.exception_direct_jump();
+                    if self.current_priv == Priv::M {
+                        self.write_csr(CSR_MTVAL, xtval as u64).unwrap();
+                    } else {
+                        self.write_csr(CSR_STVAL, xtval as u64).unwrap();
+                    }
+
+                    self.exception_direct_jump(xtvec);
                 } else {
                     let op = self.instruction & 0x7f;
                     let funct3 = (self.instruction >> 12) & 0x7;
@@ -1802,9 +1834,14 @@ impl Emulator {
                         // SRET
                         // この実装だと実装していないCSRを読み込むときはriscv-testsが失敗する想定
                         // 正しく例外を起こしている（実装済みで正常な例外）場合はmtvalを設定し、同期例外の処理を行う。
-                        self.write_csr(CSR_MTVAL, self.instruction as u64).unwrap();
 
-                        self.exception_direct_jump();
+                        if self.current_priv == Priv::M {
+                            self.write_csr(CSR_MTVAL, self.instruction as u64).unwrap();
+                        } else {
+                            self.write_csr(CSR_STVAL, self.instruction as u64).unwrap();
+                        }
+
+                        self.exception_direct_jump(xtvec);
                     } else {
                         // 実装していない可能性がある命令はこっち
                         panic!(
@@ -1815,15 +1852,7 @@ impl Emulator {
                 }
             }
             SuperSoftInt => {
-                self.interupt_vectored_jump();
-            }
-            _ => {
-                let op = self.instruction & 0x7f;
-                let funct3 = (self.instruction >> 12) & 0x7;
-                panic!(
-                    "instruction: 0x{:08x} op: 0b{:07b} funct3: 0b{:03b}\nException: {:?}",
-                    self.instruction, op, funct3, e
-                );
+                self.interupt_vectored_jump(xtvec, e as u64);
             }
         }
     }
@@ -1837,12 +1866,12 @@ impl Emulator {
             eprintln!("PC: 0x{:016x}", self.pc,);
             self.fetch();
 
-            //if self.pc == 0x4dc {
+            //if self.pc >= 0x1a8 && self.pc <= 0x1c4 {
             //    self.show_regs();
             //    println!("csr: {:x?}", self.csr);
             //}
 
-            //if self.pc == 0x1f4 {
+            //if self.pc == 0x310 {
             //    self.show_regs();
             //    println!("csr: {:x?}", self.csr);
             //    break;
@@ -1875,21 +1904,19 @@ impl Emulator {
         (self.read_raw_csr(CSR_MISA).unwrap() & 0x4) != 0
     }
 
-    fn exception_direct_jump(&mut self) {
-        let mtvec = self.read_raw_csr(CSR_MTVEC).unwrap();
-        let base = mtvec & !0x3;
+    fn exception_direct_jump(&mut self, xtvec: u64) {
+        let base = xtvec & !0x3;
 
         self.write_reg(Register::Pc, base).unwrap();
     }
 
-    fn interupt_vectored_jump(&mut self) {
+    fn interupt_vectored_jump(&mut self, xtvec: u64, xcause: u64) {
         if self.current_priv != Priv::M {
             panic!("Error: The vectored jump in only M mode is supported.");
         }
 
-        let mtvec = self.read_raw_csr(CSR_MTVEC).unwrap();
-        let base = mtvec & !0x3;
-        let cause = self.read_raw_csr(CSR_MCAUSE).unwrap();
+        let base = xtvec & !0x3;
+        let cause = xcause & !(1 << 63);
 
         self.write_reg(Register::Pc, base + cause * 4).unwrap();
     }

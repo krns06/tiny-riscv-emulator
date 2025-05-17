@@ -5,7 +5,12 @@ use crate::{
 };
 
 pub(crate) const CSR_SSTATUS: u64 = 0x100;
+pub(crate) const CSR_SIE: u64 = 0x104;
+pub(crate) const CSR_STVEC: u64 = 0x105;
 pub(crate) const CSR_SEPC: u64 = 0x141;
+pub(crate) const CSR_SCAUSE: u64 = 0x142;
+pub(crate) const CSR_STVAL: u64 = 0x143;
+pub(crate) const CSR_SIP: u64 = 0x144;
 pub(crate) const CSR_MSTATUS: u64 = 0x300;
 pub(crate) const CSR_MISA: u64 = 0x301;
 pub(crate) const CSR_MEDELEG: u64 = 0x302;
@@ -33,9 +38,10 @@ pub(crate) const CSR_MSTATUS_MPRV_MASK: u64 = 1 << 17;
 const CSR_MSTATUS_XXL_MASK: u64 = 0xa << 32;
 
 // 現在実装しているxstatus系のマスク
-const CSR_MSTATUS_MASK: u64 = 0x4019aa;
-pub(crate) const CSR_SSTATUS_MASK: u64 = 0x122;
+const CSR_MSTATUS_MASK: u64 = 0xf0004019aa;
+pub(crate) const CSR_SSTATUS_MASK: u64 = 0x300000122;
 
+const CSR_MIX_MASK: u64 = 0xaaa;
 // si{e,p}についてサポートするマスク
 const CSR_SIX_MASK: u64 = 0x222;
 
@@ -47,8 +53,11 @@ pub(crate) struct Csr {
     stvec: u64,      // 0x105
     scounteren: u64, // 0x106
 
-    sepc: u64, // 0x141
-    satp: u64, // 0x180
+    sscratch: u64, // 0x140
+    sepc: u64,     // 0x141
+    scause: u64,   // 0x142
+    stval: u64,    // 0x143
+    satp: u64,     // 0x180
 
     mstatus: u64, // 0x300 or 0x100(sstatus)
     misa: u64,    // 0x301
@@ -76,7 +85,10 @@ impl Default for Csr {
         Self {
             stvec: 0,
             scounteren: 0,
+            sscratch: 0,
             sepc: 0,
+            scause: 0,
+            stval: 0,
             satp: 0,
             mstatus: CSR_MSTATUS_XXL_MASK,
             misa: (1 << 63) | 0x141105, // (64bit,imacsu)
@@ -179,7 +191,12 @@ impl Emulator {
     pub(crate) fn read_raw_csr(&self, csr: u64) -> Result<u64> {
         match csr {
             CSR_SSTATUS => Ok(self.csr.mstatus & CSR_SSTATUS_MASK), // sstatus
+            CSR_SIE => Ok(self.csr.mie & CSR_SIX_MASK),             // sie
+            CSR_STVEC => Ok(self.csr.stvec),                        // stvec
+            0x140 => Ok(self.csr.sscratch),                         // sscratch
             CSR_SEPC => Ok(self.csr.sepc),                          // sepc
+            CSR_SCAUSE => Ok(self.csr.scause),                      // scause
+            CSR_SIP => Ok(self.csr.mip & CSR_SIX_MASK),             // sip
             0x180 => Ok(self.csr.satp),                             // satp
             CSR_MSTATUS => Ok(self.csr.mstatus),                    // mstatus
             CSR_MISA => Ok(self.csr.misa),                          // misa
@@ -262,25 +279,53 @@ impl Emulator {
                 }
 
                 self.csr.mstatus =
-                    (self.csr.mstatus & !CSR_SSTATUS_MASK) | (value & CSR_SSTATUS_MASK);
+                    (self.csr.mstatus & !CSR_MSTATUS_MASK) | (value & CSR_SSTATUS_MASK);
             } // sstatus
-            0x105 => {
+            CSR_SIE => {
+                self.csr.mie = (self.csr.mie & !CSR_MIX_MASK) | (value & CSR_SIX_MASK);
+            } // sie
+            CSR_STVEC => {
                 // mtvecと同様
                 self.csr.stvec = value & 0xfffffffffffffffd;
             } // stvec
             0x106 => {
                 self.csr.scounteren = value;
             } // scounteren
+            0x140 => {
+                self.csr.sscratch = value;
+            } // sscratch
             CSR_SEPC => {
                 // とりあえず4byteのアライメントにする
                 self.csr.sepc = value & 0xfffffffffffffffc;
             } // sepc
+            CSR_SCAUSE => {
+                self.csr.scause = value
+                    & if value >> 63 == 1 {
+                        let t = value & !(1 << 63);
+
+                        match t {
+                            1 | 5 | 9 | 13 => value,
+                            _ => 0,
+                        }
+                    } else {
+                        match value {
+                            0..=9 | 12..=13 | 15 | 18..=19 => value,
+                            _ => 0,
+                        }
+                    }
+            }
+            CSR_STVAL => {
+                self.csr.stval = value;
+            }
+            CSR_SIP => {
+                self.csr.mip = (self.csr.mip & !CSR_MIX_MASK) | (value & CSR_SIX_MASK);
+            } // sip
             0x180 => {
                 // Bareモードのみサポート
                 // Sモードをまともに実装するまでは何も行わないことにする。
 
                 if value != 0 {
-                    return Err(IllegralInstruction);
+                    eprintln!("[warning]: Writing value(not 0) to satp is not supported.");
                 }
 
                 eprint_not_working("satp");
@@ -326,7 +371,7 @@ impl Emulator {
             } // mideleg
             CSR_MIE => {
                 // LCOFIPはサポートしない
-                self.csr.mie = value & 0xaaa;
+                self.csr.mie = value & CSR_MIX_MASK;
             } // mie
             CSR_MCOUNTEREN => {
                 self.csr.mcounteren = value;
@@ -344,9 +389,9 @@ impl Emulator {
                 //
                 self.csr.mcause = value
                     & if value >> 63 == 1 {
-                        let value = value & !(1 << 63);
+                        let t = value & !(1 << 63);
 
-                        match value {
+                        match t {
                             1 | 3 | 5 | 7 | 9 | 11 | 13 => value,
                             _ => 0,
                         }
@@ -364,7 +409,7 @@ impl Emulator {
             } // mtval
             CSR_MIP => {
                 // このレジスタは割り込みが起こっているかを示すレジスタらしい
-                self.csr.mip = value & 0xaaa;
+                self.csr.mip = value & CSR_MIX_MASK;
             } // mip
             0x3a0 => {
                 self.csr.pmpcfg0 = value;
