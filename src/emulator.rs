@@ -1,12 +1,12 @@
 use std::{error::Error, path::Path};
 
 use crate::{
+    cpu::{Inst, InstClass},
     csr::{
-        Csr, CSR_MCAUSE, CSR_MEDELEG, CSR_MEPC, CSR_MIDELEG, CSR_MIE, CSR_MIP, CSR_MISA,
-        CSR_MSTATUS, CSR_MSTATUS_MIE_MASK, CSR_MSTATUS_MPIE_MASK, CSR_MSTATUS_MPP_MASK,
-        CSR_MSTATUS_SIE_MASK, CSR_MSTATUS_SPIE_MASK, CSR_MSTATUS_SPP_MASK, CSR_MSTATUS_TSR_MASK,
-        CSR_MSTATUS_TVM_MASK, CSR_MSTATUS_TW_MASK, CSR_MTVAL, CSR_MTVEC, CSR_SCAUSE, CSR_SEPC,
-        CSR_SSTATUS, CSR_SSTATUS_MASK, CSR_STVAL, CSR_STVEC,
+        Csr, CSR_MCAUSE, CSR_MEDELEG, CSR_MEPC, CSR_MIDELEG, CSR_MISA, CSR_MSTATUS,
+        CSR_MSTATUS_MIE_MASK, CSR_MSTATUS_MPIE_MASK, CSR_MSTATUS_MPP_MASK, CSR_MSTATUS_SIE_MASK,
+        CSR_MSTATUS_SPIE_MASK, CSR_MSTATUS_SPP_MASK, CSR_MTVAL, CSR_MTVEC, CSR_SCAUSE, CSR_SEPC,
+        CSR_SSTATUS, CSR_STVAL, CSR_STVEC,
     },
     exception::Exception::{self, *},
     memory::Memory,
@@ -152,6 +152,7 @@ pub struct Emulator {
     pub(crate) pc: u64,
     pub(crate) current_priv: Priv,
     pub(crate) instruction: u32,
+    pub(crate) inst: Inst,
     pub(crate) reserved_memory_ranges: Vec<(usize, usize)>, // 予約されたメモリ領域を指定する。(begin, end)
     pub(crate) c_instruction: u16,                          // C拡張の命令を格納
 
@@ -271,8 +272,8 @@ impl Emulator {
 
     // 命令を取り出す関数
     // run以外から呼んではいけない。
-    fn fetch(&mut self) {
-        self.instruction = u32::from_le_bytes(self.memory.read::<4>(self.pc as usize));
+    fn fetch(&mut self) -> u32 {
+        u32::from_le_bytes(self.memory.read::<4>(self.pc as usize))
     }
 
     // C拡張の形式の命令を実行する関数
@@ -683,33 +684,64 @@ impl Emulator {
 
     // 命令を格納するバイト列から実行する命令を判定し命令を実行する関数
     // 例外が発生した場合は即座にErrに起こった例外に対応するException型の値を返す。
-    fn exec(&mut self) -> Result<EmulatorFlag> {
-        // instruction == 0の場合は不正な命令である。
-        if self.instruction == 0 {
-            return Err(IllegralInstruction);
+    fn exec(&mut self) -> Result<()> {
+        if !self.inst.is_valid() {
+            // return Err(IllegralInstruction);
+            panic!("{:x?}", self.inst);
         }
 
-        // C拡張が有効の場合かつC拡張の命令の場合はc_execを実行する
-        if self.is_c_extension_enabled() && self.instruction & 0x3 < 3 {
-            return self.c_exec();
-        } else {
-            self.c_instruction = 0;
-        }
+        use crate::cpu::InstFormat::*;
 
-        // instruction & 0x3 != 3以外ならRV32もしくはRV64ではない可能性がある。
-        if self.instruction & 0x3 != 3 {
-            return Err(IllegralInstruction);
-        }
+        println!("[inst]: {:?}", self.inst);
 
-        let op = (self.instruction >> 2) & 0x1f;
-        let funct3 = (self.instruction >> 12) & 0x7;
+        match self.inst.format() {
+            B => {
+                let (rs1, rs2, imm) = extract_b_type(self.inst.raw());
+                let offset = sign_extend(12, imm);
 
-        match op {
-            0b00000 => {
-                let (rd, rs1, imm) = extract_i_type(self.instruction);
+                let mut flag = false;
 
-                match funct3 {
-                    0b000 => {
+                match self.inst.name() {
+                    "beq" => {
+                        flag =
+                            self.read_reg(Register::X(rs1))? == self.read_reg(Register::X(rs2))?;
+                    }
+                    "bne" => {
+                        flag =
+                            self.read_reg(Register::X(rs1))? != self.read_reg(Register::X(rs2))?;
+                    }
+                    "blt" => {
+                        flag = self.read_reg(Register::X(rs2))? as i64
+                            > self.read_reg(Register::X(rs1))? as i64;
+                    }
+                    "bge" => {
+                        flag = self.read_reg(Register::X(rs1))? as i64
+                            >= self.read_reg(Register::X(rs2))? as i64;
+                    }
+                    "bltu" => {
+                        flag =
+                            self.read_reg(Register::X(rs2))? > self.read_reg(Register::X(rs1))?;
+                    }
+                    "bgeu" => {
+                        flag =
+                            self.read_reg(Register::X(rs1))? >= self.read_reg(Register::X(rs2))?;
+                    }
+                    _ => unimplemented!(),
+                }
+
+                if flag {
+                    let dst = self.read_reg(Register::Pc)?.wrapping_add(offset);
+                    self.check_misaligned(dst)?;
+
+                    self.inst.set_class(InstClass::Jump(true));
+                    self.write_reg(Register::Pc, dst)?;
+                }
+            }
+            I => {
+                let (rd, rs1, imm) = extract_i_type(self.inst.raw());
+
+                match self.inst.name() {
+                    "lb" => {
                         let bytes = self.read_memory::<1>(
                             self.read_reg(Register::X(rs1))?
                                 .wrapping_add(sign_extend(11, imm))
@@ -720,8 +752,8 @@ impl Emulator {
                             Register::X(rd),
                             sign_extend(7, u8::from_le_bytes(bytes) as u64),
                         )?;
-                    } // LB
-                    0b001 => {
+                    }
+                    "lh" => {
                         let bytes = self.read_memory::<2>(
                             self.read_reg(Register::X(rs1))?
                                 .wrapping_add(sign_extend(11, imm))
@@ -732,8 +764,8 @@ impl Emulator {
                             Register::X(rd),
                             sign_extend(15, u16::from_le_bytes(bytes) as u64),
                         )?;
-                    } // LH
-                    0b010 => {
+                    }
+                    "lw" => {
                         let bytes = self.read_memory::<4>(
                             self.read_reg(Register::X(rs1))?
                                 .wrapping_add(sign_extend(11, imm))
@@ -744,8 +776,8 @@ impl Emulator {
                             Register::X(rd),
                             sign_extend(31, u32::from_le_bytes(bytes) as u64),
                         )?;
-                    } // LW
-                    0b011 => {
+                    }
+                    "ld" => {
                         let bytes = self.read_memory::<8>(
                             self.read_reg(Register::X(rs1))?
                                 .wrapping_add(sign_extend(11, imm))
@@ -753,8 +785,8 @@ impl Emulator {
                         )?;
 
                         self.write_reg(Register::X(rd), u64::from_le_bytes(bytes))?;
-                    } // LD
-                    0b100 => {
+                    }
+                    "lbu" => {
                         let bytes = self.read_memory::<1>(
                             self.read_reg(Register::X(rs1))?
                                 .wrapping_add(sign_extend(11, imm))
@@ -762,8 +794,8 @@ impl Emulator {
                         )?;
 
                         self.write_reg(Register::X(rd), u8::from_le_bytes(bytes) as u64)?;
-                    } // LBU
-                    0b101 => {
+                    }
+                    "lhu" => {
                         let bytes = self.read_memory::<2>(
                             self.read_reg(Register::X(rs1))?
                                 .wrapping_add(sign_extend(11, imm))
@@ -771,8 +803,8 @@ impl Emulator {
                         )?;
 
                         self.write_reg(Register::X(rd), u16::from_le_bytes(bytes) as u64)?;
-                    } // LHU
-                    0b110 => {
+                    }
+                    "lwu" => {
                         let bytes = self.read_memory::<4>(
                             self.read_reg(Register::X(rs1))?
                                 .wrapping_add(sign_extend(11, imm))
@@ -780,706 +812,131 @@ impl Emulator {
                         )?;
 
                         self.write_reg(Register::X(rd), u32::from_le_bytes(bytes) as u64)?;
-                    } // LHU
-                    _ => return Err(IllegralInstruction),
-                }
-            }
-            0b00011 => {
-                // 並行処理系の工夫する構造はないので作るまでは実装しない。
-                eprintln!("[warning]: fence may not work properly.");
-
-                match self.instruction {
-                    0x8330000f | 0x0100000f => {
-                        // FENCE.TSO PAUSEは実装していない
-                        return Err(IllegralInstruction);
-                    } // FENCE.TSO PAUSE
-                    _ => {} //fence
-                }
-            }
-            0b00100 => {
-                let (rd, rs1, imm) = extract_i_type(self.instruction);
-
-                match (funct3, imm >> 6) {
-                    (0b000, _) => self.write_reg(
+                    }
+                    "addi" => self.write_reg(
                         Register::X(rd),
                         self.read_reg(Register::X(rs1))?
                             .wrapping_add(sign_extend(11, imm)),
-                    )?, //ADDI
-                    (0b001, 0b000000) => {
-                        self.write_reg(
-                            Register::X(rd),
-                            self.read_reg(Register::X(rs1))? << (imm & 0x3f),
-                        )?;
-                    } // SLLI
-                    (0b010, _) => {
-                        self.write_reg(
-                            Register::X(rd),
-                            if sign_extend(11, imm) as i64 > self.read_reg(Register::X(rs1))? as i64
-                            {
-                                1
-                            } else {
-                                0
-                            },
-                        )?;
-                    } // SLTI
-                    (0b011, _) => {
-                        self.write_reg(
-                            Register::X(rd),
-                            if sign_extend(11, imm) > self.read_reg(Register::X(rs1))? {
-                                1
-                            } else {
-                                0
-                            },
-                        )?;
-                    } // SLTIU
-                    (0b100, _) => {
-                        self.write_reg(
-                            Register::X(rd),
-                            self.read_reg(Register::X(rs1))? ^ sign_extend(11, imm),
-                        )?;
-                    } // XORI
-                    (0b101, 0b000000) => {
-                        self.write_reg(
-                            Register::X(rd),
-                            self.read_reg(Register::X(rs1))? >> (imm & 0x3f),
-                        )?;
-                    } // SRLI
-                    (0b101, 0b010000) => {
-                        self.write_reg(
-                            Register::X(rd),
-                            sign_extend(
-                                63 - (imm as u8 & 0x3f),
-                                self.read_reg(Register::X(rs1))? >> (imm & 0x3f),
-                            ),
-                        )?;
-                    } // SRAI
-                    (0b110, _) => self.write_reg(
+                    )?,
+                    "slli" => self.write_reg(
                         Register::X(rd),
-                        self.read_reg(Register::X(rs1))? | sign_extend(11, imm),
-                    )?, // ORI
-                    (0b111, _) => self.write_reg(
+                        self.read_reg(Register::X(rs1))? << (imm & 0x3f),
+                    )?,
+                    "slti" => self.write_reg(
+                        Register::X(rd),
+                        if sign_extend(11, imm) as i64 > self.read_reg(Register::X(rs1))? as i64 {
+                            1
+                        } else {
+                            0
+                        },
+                    )?,
+                    "sltiu" => self.write_reg(
+                        Register::X(rd),
+                        if sign_extend(11, imm) > self.read_reg(Register::X(rs1))? {
+                            1
+                        } else {
+                            0
+                        },
+                    )?,
+                    "xori" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))? ^ sign_extend(11, imm),
+                    )?,
+                    "srli" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))? >> (imm & 0x3f),
+                    )?,
+                    "srai" => self.write_reg(
+                        Register::X(rd),
+                        sign_extend(
+                            63 - (imm as u8 & 0x3f),
+                            self.read_reg(Register::X(rs1))? >> (imm & 0x3f),
+                        ),
+                    )?,
+                    "andi" => self.write_reg(
                         Register::X(rd),
                         self.read_reg(Register::X(rs1))? & sign_extend(11, imm),
-                    )?, // ANDI
-                    _ => return Err(IllegralInstruction),
-                };
-            }
-            0b00101 => {
-                let (rd, imm) = extract_u_type(self.instruction);
-
-                self.write_reg(
-                    Register::X(rd),
-                    self.read_reg(Register::Pc)?
-                        .wrapping_add(sign_extend(31, imm)),
-                )?;
-            } // AUIPC
-            0b00110 => {
-                let (rd, rs1, imm) = extract_i_type(self.instruction);
-
-                match (funct3, self.instruction >> 26) {
-                    (0b000, _) => {
-                        self.write_reg(
-                            Register::X(rd),
-                            sign_extend(
-                                31,
-                                self.read_reg(Register::X(rs1))?
-                                    .wrapping_add(sign_extend(11, imm))
-                                    & 0xffffffff,
-                            ),
-                        )?;
-                    } // ADDIW
-                    (0b001, 0) => {
-                        self.write_reg(
-                            Register::X(rd),
-                            sign_extend(
-                                31,
-                                (self.read_reg(Register::X(rs1))? << (imm & 0x1f)) & 0xffffffff,
-                            ),
-                        )?;
-                    } // SLL
-                    (0b101, 0) => {
-                        self.write_reg(
-                            Register::X(rd),
-                            sign_extend(
-                                31,
-                                (self.read_reg(Register::X(rs1))? & 0xffffffff) >> (imm & 0x1f)
-                                    & 0xffffffff,
-                            ),
-                        )?;
-                    } // SRLIW
-                    (0b101, 0b010000) => {
-                        self.write_reg(
-                            Register::X(rd),
-                            sign_extend(
-                                31 - (imm & 0x1f) as u8,
-                                ((self.read_reg(Register::X(rs1))? & 0xffffffff) >> (imm & 0x1f))
-                                    & 0xffffffff,
-                            ),
-                        )?;
-                    } // SRAIW
-                    _ => return Err(IllegralInstruction),
-                }
-            }
-            0b01000 => {
-                let (rs1, rs2, imm) = extract_s_type(self.instruction);
-
-                // 簡単にリファクタできるかもしれない
-
-                match funct3 {
-                    0b000 => {
-                        let bytes = (self.read_reg(Register::X(rs2))? as u8).to_le_bytes();
-
-                        self.write_memory(
+                    )?,
+                    "ori" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))? | sign_extend(11, imm),
+                    )?,
+                    "addiw" => self.write_reg(
+                        Register::X(rd),
+                        sign_extend(
+                            31,
                             self.read_reg(Register::X(rs1))?
                                 .wrapping_add(sign_extend(11, imm))
-                                as usize,
-                            &bytes,
-                        )?;
-                    } // SB
-                    0b001 => {
-                        let bytes = (self.read_reg(Register::X(rs2))? as u16).to_le_bytes();
+                                & 0xffffffff,
+                        ),
+                    )?,
+                    "slliw" => self.write_reg(
+                        Register::X(rd),
+                        sign_extend(
+                            31,
+                            (self.read_reg(Register::X(rs1))? << (imm & 0x1f)) & 0xffffffff,
+                        ),
+                    )?,
+                    "srliw" => self.write_reg(
+                        Register::X(rd),
+                        sign_extend(
+                            31,
+                            (self.read_reg(Register::X(rs1))? & 0xffffffff) >> (imm & 0x1f)
+                                & 0xffffffff,
+                        ),
+                    )?,
+                    "sraiw" => self.write_reg(
+                        Register::X(rd),
+                        sign_extend(
+                            31 - (imm & 0x1f) as u8,
+                            ((self.read_reg(Register::X(rs1))? & 0xffffffff) >> (imm & 0x1f))
+                                & 0xffffffff,
+                        ),
+                    )?,
+                    "jalr" => {
+                        let offset = sign_extend(11, imm);
 
-                        self.write_memory(
-                            self.read_reg(Register::X(rs1))?
-                                .wrapping_add(sign_extend(11, imm))
-                                as usize,
-                            &bytes,
-                        )?;
-                    } // SH
-                    0b010 => {
-                        let bytes = (self.read_reg(Register::X(rs2))? as u32).to_le_bytes();
+                        let pc = self.read_reg(Register::Pc)?;
+                        let dst = self.read_reg(Register::X(rs1))?.wrapping_add(offset) & !1;
 
-                        self.write_memory(
-                            self.read_reg(Register::X(rs1))?
-                                .wrapping_add(sign_extend(11, imm))
-                                as usize,
-                            &bytes,
-                        )?;
-                    } // SW
-                    0b011 => {
-                        let bytes = self.read_reg(Register::X(rs2))?.to_le_bytes();
+                        self.check_misaligned(dst)?;
 
-                        self.write_memory(
-                            self.read_reg(Register::X(rs1))?
-                                .wrapping_add(sign_extend(11, imm))
-                                as usize,
-                            &bytes,
-                        )?;
-                    } // SD
-                    _ => return Err(IllegralInstruction),
-                }
-            }
-            0b01011 => {
-                let (rd, rs1, rs2, funct7) = extract_r_type(self.instruction);
+                        self.write_reg(Register::X(rd), pc + 4)?;
+                        self.write_reg(Register::Pc, dst)?;
+                        self.inst.set_class(InstClass::Jump(true));
+                    }
+                    "csrrw" => {
+                        let csr = if rd != 0 { self.read_csr(imm)? } else { 0 };
+                        self.write_csr(imm, self.read_reg(Register::X(rs1))?)?;
 
-                let addr = self.read_reg(Register::X(rs1))? as usize;
-
-                // PMAでアライメントは変更することができるらしい。
-
-                match funct3 {
-                    0b010 => {
-                        // 32bit版の場合は4バイトアライメント
-                        self.check_misaligned(addr as u64)?;
-
-                        if funct7 >> 2 == 0b00011 {
-                            // SC.W
-
-                            if let Some(range) = self.pop_reserved_memory_range() {
-                                // 予約領域が存在している場合
-
-                                if range.0 <= addr && range.1 >= addr + 4 {
-                                    // 予約領域内の場合はそのメモリ領域に書き込みを行い、rdに0を書き込む。
-                                    self.write_memory(
-                                        addr,
-                                        &(self.read_reg(Register::X(rs2))? as u32).to_le_bytes(),
-                                    )?;
-
-                                    self.write_reg(Register::X(rd), 0)?;
-                                } else {
-                                    // 上の条件に当てはまらない場合はrdに1を書き込むことにする。
-                                    self.write_reg(Register::X(rd), 1)?;
-                                }
-                            } else {
-                                // ここで二回同じコードを書いているがif-let chainが使えるようになったら一つで済むようになる。
-                                self.write_reg(Register::X(rd), 1)?;
-                            }
-                        } else {
-                            let v = u32::from_le_bytes(self.read_memory::<4>(addr)?);
-
-                            match funct7 >> 2 {
-                                0 => self.write_memory(
-                                    addr,
-                                    &(v.wrapping_add(self.read_reg(Register::X(rs2))? as u32))
-                                        .to_le_bytes(),
-                                )?, // AMOADD.W
-                                0b00001 => {
-                                    self.write_memory(
-                                        addr,
-                                        &(self.read_reg(Register::X(rs2))? as u32).to_le_bytes(),
-                                    )?;
-                                    self.write_reg(Register::X(rs2), v as u64)?;
-                                } // AMOSWAP.W
-                                0b00010 => {
-                                    self.write_reg(Register::X(rd), sign_extend(31, v as u64))?;
-                                    self.push_reserved_memory_range((addr, addr + 4));
-                                } // LR.W
-                                // 0b00011 => {} // SC.W 上に実装済み
-                                0b00100 => self.write_memory(
-                                    addr,
-                                    &(v ^ (self.read_reg(Register::X(rs2))? as u32)).to_le_bytes(),
-                                )?,
-                                0b01100 => self.write_memory(
-                                    addr,
-                                    &(v & (self.read_reg(Register::X(rs2))? as u32)).to_le_bytes(),
-                                )?, // AMOAND.W
-                                0b01000 => self.write_memory(
-                                    addr,
-                                    &(v | (self.read_reg(Register::X(rs2))? as u32)).to_le_bytes(),
-                                )?,
-                                0b10000 => {
-                                    let rs2_val = self.read_reg(Register::X(rs2))? as u32;
-
-                                    self.write_memory(
-                                        addr,
-                                        &(if rs2_val as i32 > v as i32 {
-                                            v
-                                        } else {
-                                            rs2_val
-                                        })
-                                        .to_le_bytes(),
-                                    )?;
-                                } // AMOMIN.W
-                                0b10100 => {
-                                    let rs2_val = self.read_reg(Register::X(rs2))? as u32;
-
-                                    self.write_memory(
-                                        addr,
-                                        &(if v as i32 > rs2_val as i32 {
-                                            v
-                                        } else {
-                                            rs2_val
-                                        })
-                                        .to_le_bytes(),
-                                    )?;
-                                } // AMOMAX.W
-                                0b11000 => self.write_memory(
-                                    addr,
-                                    &v.min(self.read_reg(Register::X(rs2))? as u32).to_le_bytes(),
-                                )?, // AMOMINU.W
-                                0b11100 => self.write_memory(
-                                    addr,
-                                    &v.max(self.read_reg(Register::X(rs2))? as u32).to_le_bytes(),
-                                )?, // AMOMAXU.W
-                                _ => return Err(IllegralInstruction),
-                            }
-
-                            self.write_reg(Register::X(rd), sign_extend(31, v as u64))?;
+                        if rd != 0 {
+                            self.write_reg(Register::X(rd), csr)?;
                         }
                     }
-                    0b011 => {
-                        // 64bit版の場合は8バイトアライメント
-                        self.check_misaligned_nbyte_misaligned(addr as u64, 8)?;
+                    "csrrs" => {
+                        let csr = self.read_csr(imm)?;
+                        let rs1 = self.read_reg(Register::X(rs1))?;
 
-                        let v = u64::from_le_bytes(self.read_memory::<8>(addr)?);
+                        self.write_reg(Register::X(rd), csr)?;
 
-                        match funct7 >> 2 {
-                            0 => self.write_memory(
-                                addr,
-                                &(v.wrapping_add(self.read_reg(Register::X(rs2))?)).to_le_bytes(),
-                            )?, // AMOADD.D
-                            0b00001 => {
-                                self.write_memory(
-                                    addr,
-                                    &self.read_reg(Register::X(rs2))?.to_le_bytes(),
-                                )?;
-                                self.write_reg(Register::X(rs2), v)?;
-                            } // AMOSWAP.D
-                            // 0b0011 => {} SC.Dを作るときはSC.Wを参考にする。
-                            0b00100 => self.write_memory(
-                                addr,
-                                &(v ^ self.read_reg(Register::X(rs2))?).to_le_bytes(),
-                            )?, // AMOXOR.D
-                            0b01100 => self.write_memory(
-                                addr,
-                                &(v & self.read_reg(Register::X(rs2))?).to_le_bytes(),
-                            )?, // AMOAND.D
-                            0b01000 => self.write_memory(
-                                addr,
-                                &(v | self.read_reg(Register::X(rs2))?).to_le_bytes(),
-                            )?, // AMOOR.D
-                            0b10000 => {
-                                let rs2_val = self.read_reg(Register::X(rs2))?;
-
-                                self.write_memory(
-                                    addr,
-                                    &(if rs2_val as i64 > v as i64 {
-                                        v
-                                    } else {
-                                        rs2_val
-                                    })
-                                    .to_le_bytes(),
-                                )?;
-                            } // AMOMIN.D
-                            0b10100 => {
-                                let rs2_val = self.read_reg(Register::X(rs2))?;
-
-                                self.write_memory(
-                                    addr,
-                                    &(if v as i64 > rs2_val as i64 {
-                                        v
-                                    } else {
-                                        rs2_val
-                                    })
-                                    .to_le_bytes(),
-                                )?;
-                            } // AMOMAX.D
-                            0b11000 => self.write_memory(
-                                addr,
-                                &v.min(self.read_reg(Register::X(rs2))?).to_le_bytes(),
-                            )?,
-                            0b11100 => self.write_memory(
-                                addr,
-                                &v.max(self.read_reg(Register::X(rs2))?).to_le_bytes(),
-                            )?, // AMOMAXU.D
-                            _ => return Err(IllegralInstruction),
+                        if rs1 != 0 {
+                            self.write_csr(imm, csr & !rs1)?;
                         }
-
-                        self.write_reg(Register::X(rd), v)?;
                     }
-                    _ => return Err(IllegralInstruction),
+                    "csrrwi" => {
+                        let csr = if rd != 0 { self.read_csr(imm)? } else { 0 };
+
+                        self.write_csr(imm, rs1 as u64)?;
+
+                        if rd != 0 {
+                            self.write_reg(Register::X(rd), csr)?;
+                        }
+                    }
+                    _ => unimplemented!(),
                 }
             }
-            0b01100 => {
-                let (rd, rs1, rs2, funct7) = extract_r_type(self.instruction);
-
-                // rd == 0のときにスキップしても良さそうではある。
-
-                match (funct3, funct7) {
-                    (0, 0) => self.write_reg(
-                        Register::X(rd),
-                        self.read_reg(Register::X(rs1))?
-                            .wrapping_add(self.read_reg(Register::X(rs2))?),
-                    )?, // ADD
-                    (0, 0b0000001) => self.write_reg(
-                        Register::X(rd),
-                        self.read_reg(Register::X(rs1))?
-                            .wrapping_mul(self.read_reg(Register::X(rs2))?),
-                    )?, // MUL
-                    (0, 0b0100000) => self.write_reg(
-                        Register::X(rd),
-                        self.read_reg(Register::X(rs1))?
-                            .wrapping_sub(self.read_reg(Register::X(rs2))?),
-                    )?, // SUB
-                    (0b001, 0) => self.write_reg(
-                        Register::X(rd),
-                        self.read_reg(Register::X(rs1))?
-                            << (self.read_reg(Register::X(rs2))? & 0x3f),
-                    )?, // SLL
-                    (0b001, 0b0000001) => {
-                        let rs1 = sign_extend_128bit(63, self.read_reg(Register::X(rs1))? as u128);
-                        let rs2 = sign_extend_128bit(63, self.read_reg(Register::X(rs2))? as u128);
-
-                        self.write_reg(
-                            Register::X(rd),
-                            (((rs1 as i128) * (rs2 as i128)) >> 64) as u64,
-                        )?;
-                    } // MULH
-                    (0b010, 0) => self.write_reg(
-                        Register::X(rd),
-                        if self.read_reg(Register::X(rs2))? as i64
-                            > self.read_reg(Register::X(rs1))? as i64
-                        {
-                            1
-                        } else {
-                            0
-                        },
-                    )?, // SLT
-                    (0b010, 0b0000001) => {
-                        let rs1 = sign_extend_128bit(63, self.read_reg(Register::X(rs1))? as u128);
-                        let rs2 = self.read_reg(Register::X(rs2))? as u128;
-
-                        self.write_reg(Register::X(rd), (rs1.wrapping_mul(rs2) >> 64) as u64)?;
-                    } // MULH
-                    (0b011, 0) => self.write_reg(
-                        Register::X(rd),
-                        if self.read_reg(Register::X(rs2))? > self.read_reg(Register::X(rs1))? {
-                            1
-                        } else {
-                            0
-                        },
-                    )?, // SLTU
-                    (0b011, 0b0000001) => {
-                        let rs1 = self.read_reg(Register::X(rs1))? as u128;
-                        let rs2 = self.read_reg(Register::X(rs2))? as u128;
-
-                        self.write_reg(Register::X(rd), (rs1.wrapping_mul(rs2) >> 64) as u64)?;
-                    } // MULHU
-                    (0b100, 0) => {
-                        self.write_reg(
-                            Register::X(rd),
-                            self.read_reg(Register::X(rs1))? ^ self.read_reg(Register::X(rs2))?,
-                        )?;
-                    } // XOR
-                    (0b100, 0b0000001) => {
-                        let rs1 = self.read_reg(Register::X(rs1))?;
-                        let rs2 = self.read_reg(Register::X(rs2))?;
-
-                        // 符号付きの割り算
-                        // 符号のオーバーフローが起こった場合はrs1の値
-                        // 0で割り算する場合はすべてのbitが１になっている値
-                        // 以外は普通にわり算の値
-                        // をrdにセットする。
-
-                        self.write_reg(
-                            Register::X(rd),
-                            if rs1 == 1 << 63 && rs2 == !0 {
-                                rs1
-                            } else if rs2 == 0 {
-                                u64::MAX
-                            } else {
-                                (rs1 as i64 / rs2 as i64) as u64
-                            },
-                        )?;
-                    } // DIV
-                    (0b101, 0) => {
-                        let shift = self.read_reg(Register::X(rs2))? & 0x3f;
-
-                        self.write_reg(Register::X(rd), self.read_reg(Register::X(rs1))? >> shift)?;
-                    } // SRL
-                    (0b101, 0b0000001) => {
-                        let rs1 = self.read_reg(Register::X(rs1))?;
-                        let rs2 = self.read_reg(Register::X(rs2))?;
-
-                        self.write_reg(
-                            Register::X(rd),
-                            if rs2 == 0 { u64::MAX } else { rs1 / rs2 },
-                        )?;
-                    } // DIVU
-                    (0b101, 0b0100000) => {
-                        let shift = self.read_reg(Register::X(rs2))? & 0x3f;
-
-                        self.write_reg(
-                            Register::X(rd),
-                            sign_extend(
-                                63 - shift as u8,
-                                self.read_reg(Register::X(rs1))? >> shift,
-                            ),
-                        )?;
-                    } // SRA
-                    (0b110, 0) => self.write_reg(
-                        Register::X(rd),
-                        self.read_reg(Register::X(rs1))? | self.read_reg(Register::X(rs2))?,
-                    )?, // OR
-                    (0b110, 0b0000001) => {
-                        let rs1 = self.read_reg(Register::X(rs1))?;
-                        let rs2 = self.read_reg(Register::X(rs2))?;
-
-                        self.write_reg(
-                            Register::X(rd),
-                            if rs1 == 1 << 63 && rs2 == !0 {
-                                0
-                            } else if rs2 == 0 {
-                                rs1
-                            } else {
-                                (rs1 as i64 % rs2 as i64) as u64
-                            },
-                        )?
-                    } // REM
-                    (0b111, 0) => self.write_reg(
-                        Register::X(rd),
-                        self.read_reg(Register::X(rs1))? & self.read_reg(Register::X(rs2))?,
-                    )?, // AND
-                    (0b111, 0b0000001) => {
-                        let rs1 = self.read_reg(Register::X(rs1))?;
-                        let rs2 = self.read_reg(Register::X(rs2))?;
-
-                        self.write_reg(Register::X(rd), if rs2 == 0 { rs1 } else { rs1 % rs2 })?;
-                    } // REMU
-                    _ => return Err(IllegralInstruction),
-                }
-            }
-            0b01101 => {
-                let (rd, imm) = extract_u_type(self.instruction);
-
-                self.write_reg(Register::X(rd), sign_extend(31, imm))?;
-            } // LUI
-            0b01110 => {
-                let (rd, rs1, rs2, funct7) = extract_r_type(self.instruction);
-
-                match (funct3, funct7) {
-                    (0b000, 0) => {
-                        self.write_reg(
-                            Register::X(rd),
-                            sign_extend(
-                                31,
-                                self.read_reg(Register::X(rs1))?
-                                    .wrapping_add(self.read_reg(Register::X(rs2))?)
-                                    & 0xffffffff,
-                            ),
-                        )?;
-                    } // ADDW
-                    (0b000, 0b0000001) => {
-                        let rs1 = self.read_reg(Register::X(rs1))? & 0xffffffff;
-                        let rs2 = self.read_reg(Register::X(rs2))? & 0xffffffff;
-
-                        self.write_reg(Register::X(rd), sign_extend(31, (rs1 * rs2) & 0xffffffff))?;
-                    } // MULW
-                    (0b000, 0b0100000) => {
-                        self.write_reg(
-                            Register::X(rd),
-                            sign_extend(
-                                31,
-                                self.read_reg(Register::X(rs1))?
-                                    .wrapping_sub(self.read_reg(Register::X(rs2))?)
-                                    & 0xffffffff,
-                            ),
-                        )?;
-                    } // ADDW
-                    (0b001, 0) => {
-                        self.write_reg(
-                            Register::X(rd),
-                            sign_extend(
-                                31,
-                                (self.read_reg(Register::X(rs1))?
-                                    << (self.read_reg(Register::X(rs2))? & 0x1f))
-                                    & 0xffffffff,
-                            ),
-                        )?;
-                    } // SLLW
-                    (0b100, 0b0000001) => {
-                        let rs1 = self.read_reg(Register::X(rs1))? as i32;
-                        let rs2 = self.read_reg(Register::X(rs2))? as i32;
-
-                        self.write_reg(
-                            Register::X(rd),
-                            if rs1 == i32::MIN && rs2 == !0 {
-                                rs1 as u64
-                            } else if rs2 == 0 {
-                                u64::MAX
-                            } else {
-                                (rs1 / rs2) as u64
-                            },
-                        )?;
-                    } // SLLW
-                    (0b101, 0) => {
-                        let shift = self.read_reg(Register::X(rs2))? & 0x1f;
-                        self.write_reg(
-                            Register::X(rd),
-                            sign_extend(
-                                31,
-                                ((self.read_reg(Register::X(rs1))? & 0xffffffff) >> shift)
-                                    & 0xffffffff,
-                            ),
-                        )?;
-                    } // SRLW
-                    (0b101, 0b0000001) => {
-                        let rs1 = self.read_reg(Register::X(rs1))?;
-                        let rs2 = self.read_reg(Register::X(rs2))?;
-
-                        self.write_reg(
-                            Register::X(rd),
-                            if rs2 == 0 {
-                                u64::MAX
-                            } else {
-                                sign_extend(31, (rs1 / rs2) & 0xffffffff)
-                            },
-                        )?;
-                    } // DIVUW
-                    (0b101, 0b0100000) => {
-                        let shift = self.read_reg(Register::X(rs2))? & 0x1f;
-                        self.write_reg(
-                            Register::X(rd),
-                            sign_extend(
-                                31 - shift as u8,
-                                ((self.read_reg(Register::X(rs1))? & 0xffffffff) >> shift)
-                                    & 0xffffffff,
-                            ),
-                        )?;
-                    } // SRAW
-                    (0b110, 0b0000001) => {
-                        let rs1 = self.read_reg(Register::X(rs1))? & 0xffffffff;
-                        let rs2 = self.read_reg(Register::X(rs2))? & 0xffffffff;
-
-                        self.write_reg(
-                            Register::X(rd),
-                            if rs1 == 1 << 31 && rs2 == 0xffffffff {
-                                0
-                            } else if rs2 == 0 {
-                                sign_extend(31, rs1)
-                            } else {
-                                (rs1 as i32 % rs2 as i32) as u64
-                            },
-                        )?;
-                    } // REMW
-                    (0b111, 0b0000001) => {
-                        let rs1 = self.read_reg(Register::X(rs1))? & 0xffffffff;
-                        let rs2 = self.read_reg(Register::X(rs2))? & 0xffffffff;
-
-                        self.write_reg(
-                            Register::X(rd),
-                            sign_extend(31, if rs2 == 0 { rs1 } else { rs1 % rs2 }),
-                        )?;
-                    } // REMUW
-                    _ => return Err(IllegralInstruction),
-                }
-            }
-            0b11000 => {
-                let (rs1, rs2, imm) = extract_b_type(self.instruction);
-                let offset = sign_extend(12, imm);
-
-                let mut flag = false;
-
-                match funct3 {
-                    0b000 => {
-                        flag =
-                            self.read_reg(Register::X(rs1))? == self.read_reg(Register::X(rs2))?;
-                    } // BEQ
-                    0b001 => {
-                        flag =
-                            self.read_reg(Register::X(rs1))? != self.read_reg(Register::X(rs2))?;
-                    } // BNE
-                    0b100 => {
-                        flag = self.read_reg(Register::X(rs2))? as i64
-                            > self.read_reg(Register::X(rs1))? as i64;
-                    } // BLT
-                    0b101 => {
-                        flag = self.read_reg(Register::X(rs1))? as i64
-                            >= self.read_reg(Register::X(rs2))? as i64;
-                    } // BGE
-                    0b110 => {
-                        flag =
-                            self.read_reg(Register::X(rs2))? > self.read_reg(Register::X(rs1))?;
-                    } // BLT
-                    0b111 => {
-                        flag =
-                            self.read_reg(Register::X(rs1))? >= self.read_reg(Register::X(rs2))?;
-                    } // BGEU
-                    _ => return Err(IllegralInstruction),
-                };
-
-                if flag {
-                    let dst = self.read_reg(Register::Pc)?.wrapping_add(offset);
-                    self.check_misaligned(dst)?;
-
-                    self.write_reg(Register::Pc, dst)?;
-                    return Ok(EmulatorFlag::Jump);
-                }
-            }
-            0b11001 => {
-                let (rd, rs1, imm) = extract_i_type(self.instruction);
-                let offset = sign_extend(11, imm);
-
-                let pc = self.read_reg(Register::Pc)?;
-                let dst = self.read_reg(Register::X(rs1))?.wrapping_add(offset) & !1;
-
-                self.check_misaligned(dst)?;
-
-                self.write_reg(Register::X(rd), pc + 4)?;
-                self.write_reg(Register::Pc, dst)?;
-                return Ok(EmulatorFlag::Jump);
-            } // JALR
-            0b11011 => {
-                let (rd, imm) = extract_j_type(self.instruction);
+            J => {
+                let (rd, imm) = extract_j_type(self.inst.raw());
                 let offset = sign_extend(20, imm);
 
                 let pc = self.read_reg(Register::Pc)?;
@@ -1491,229 +948,248 @@ impl Emulator {
 
                 self.write_reg(Register::X(rd), pc + 4)?;
                 self.write_reg(Register::Pc, dst)?;
-                return Ok(EmulatorFlag::Jump);
-            } //JAL
-            0b11100 => {
-                let (rd, rs1, imm) = extract_i_type(self.instruction);
+                self.inst.set_class(InstClass::Jump(true));
+            }
+            R => {
+                let (rd, rs1, rs2, _) = extract_r_type(self.inst.raw());
 
-                // 実装するときは非権限の方のCSRの章を読む。
-                // rd==0のときとかrs1==0のときに読み書きしない場合等が記載されている。
-                // IllegralInstructionのときはここの命令が実装されていないorCSRの方で実装されていないかを疑う。
-                // CSRの方のいくつかの例外はVirtual Instructionでもいいらしい。
+                match self.inst.name() {
+                    "add" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))?
+                            .wrapping_add(self.read_reg(Register::X(rs2))?),
+                    )?,
+                    "mul" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))?
+                            .wrapping_mul(self.read_reg(Register::X(rs2))?),
+                    )?,
+                    "sub" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))?
+                            .wrapping_sub(self.read_reg(Register::X(rs2))?),
+                    )?,
+                    "sll" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))?
+                            << (self.read_reg(Register::X(rs2))? & 0x3f),
+                    )?,
+                    "slt" => self.write_reg(
+                        Register::X(rd),
+                        if self.read_reg(Register::X(rs2))? as i64
+                            > self.read_reg(Register::X(rs1))? as i64
+                        {
+                            1
+                        } else {
+                            0
+                        },
+                    )?,
+                    "sltu" => self.write_reg(
+                        Register::X(rd),
+                        if self.read_reg(Register::X(rs2))? > self.read_reg(Register::X(rs1))? {
+                            1
+                        } else {
+                            0
+                        },
+                    )?,
+                    "xor" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))? ^ self.read_reg(Register::X(rs2))?,
+                    )?,
+                    "sra" => {
+                        let shift = self.read_reg(Register::X(rs2))? & 0x3f;
 
-                match funct3 {
-                    0b000 => {
-                        match self.instruction >> 25 {
-                            0b0001001 => {
-                                if self.current_priv != Priv::S {
-                                    panic!(
-                                        "Error: executing sfence.vma in S mode is only supported."
-                                    );
-                                }
-
-                                // よくわからないがriscv-testsでは
-                                // mstatus.TVM == 0 && current_priv == S_MODE
-                                // でも例外が発生するらしい。
-                                // ここはissueを投げるか検討
-
-                                return Err(IllegralInstruction);
-
-                                //let tvm =
-                                //    self.read_raw_csr(CSR_MSTATUS).unwrap() & CSR_MSTATUS_TVM_MASK;
-
-                                //if tvm != 0 {
-                                //    // tvmが設定されている場合はSモードで実行している場合は例外が発生する可能性があるらしい。
-                                //    panic!("Error: sfence.vma is not supported when mstatus.TVM equals 1.");
-                                //}
-                            } // SFENCE.VMA
-                            _ => {
-                                match self.instruction {
-                                    0x00000073 => match self.current_priv {
-                                        Priv::M => return Err(EnvironmentCallFromMMode),
-                                        Priv::S => return Err(EnvironmentCallFromSMode),
-                                        Priv::U => return Err(EnvironmentCallFromUMode),
-                                    }, //ECALL
-                                    0x10200073 => {
-                                        use Priv::*;
-
-                                        match self.current_priv {
-                                            M | S => {
-                                                let mstatus =
-                                                    self.read_raw_csr(CSR_MSTATUS).unwrap();
-
-                                                if self.current_priv == S
-                                                    && mstatus & CSR_MSTATUS_TSR_MASK != 0
-                                                {
-                                                    // Sモードでmstatus.TSRが有効な場合はIllegralInstructionを起こす。
-                                                    return Err(IllegralInstruction);
-                                                }
-
-                                                let spp = (mstatus & CSR_MSTATUS_SPP_MASK) >> 8;
-                                                let spie = (mstatus & CSR_MSTATUS_SPIE_MASK) >> 5;
-                                                let new_sstaus = (mstatus
-                                                    & !CSR_SSTATUS_MASK
-                                                    & !CSR_MSTATUS_SPP_MASK
-                                                    & !CSR_MSTATUS_SPIE_MASK
-                                                    & !CSR_MSTATUS_SIE_MASK)
-                                                    | ((Priv::U as u64) << 8)
-                                                    | (1 << 8)
-                                                    | (spie << 1);
-
-                                                self.write_csr(CSR_SSTATUS, new_sstaus).unwrap();
-                                                self.write_reg(
-                                                    Register::Pc,
-                                                    self.read_csr(CSR_SEPC).unwrap(),
-                                                )
-                                                .unwrap();
-                                                self.current_priv = Priv::from(spp);
-
-                                                eprintln!("current_priv: {:?}", self.current_priv);
-                                                return Ok(EmulatorFlag::Jump);
-                                            }
-                                            _ => return Err(IllegralInstruction),
-                                        }
-                                    } // SRET
-                                    0x10500073 => {
-                                        if self.current_priv != Priv::S {
-                                            panic!("Error: wfi in only S MODE is supported.");
-                                        }
-
-                                        let tw = self.read_raw_csr(CSR_MSTATUS).unwrap()
-                                            & CSR_MSTATUS_TW_MASK;
-
-                                        if tw == 0 {
-                                            // timeoutがないとき
-                                            eprintln!("[info]: Starting wfi loop...");
-                                            loop {
-                                                // mi{e,p}の値がそれぞれセットされている場合はxstatus.MIEにかかわらず終了する。
-                                                let active = self.read_raw_csr(CSR_MIE).unwrap()
-                                                    & self.read_raw_csr(CSR_MIP).unwrap();
-
-                                                if active != 0 {
-                                                    if active.count_ones() != 1 {
-                                                        panic!("Error: Nested traps are not supported.");
-                                                    }
-
-                                                    match active {
-                                                        2 => break,
-                                                        _ => panic!(
-                                                    "Error: The active interrupt is not suported."
-                                                ),
-                                                    }
-                                                }
-                                            }
-                                            eprintln!("[info]: Ending wfi loop...");
-                                        } else {
-                                            // timeoutがあるとき
-                                            panic!("Error: tw of wfi is not supported.");
-                                        }
-                                    } // WFI
-                                    0x30200073 => match self.current_priv {
-                                        Priv::M => {
-                                            let mstatus = self.read_raw_csr(CSR_MSTATUS).unwrap();
-
-                                            let mpp = (mstatus & CSR_MSTATUS_MPP_MASK) >> 11;
-                                            let mpie = (mstatus & CSR_MSTATUS_MPIE_MASK) >> 7;
-                                            // Memory Privilege in mstatus Registerは後実装する。
-                                            // let mprv = if mpp == Priv::M as u64 { 1 } else { 0 };
-
-                                            let new_mstatus = (mstatus
-                                                & !CSR_MSTATUS_MIE_MASK
-                                                & !CSR_MSTATUS_MPP_MASK
-                                                & !(CSR_MSTATUS_MPIE_MASK))
-                                                | (mpie << 3)
-                                                | (1 << 7)
-                                                | ((Priv::U as u64) << 11);
-
-                                            self.write_csr(CSR_MSTATUS, new_mstatus).unwrap();
-                                            self.write_reg(
-                                                Register::Pc,
-                                                self.read_csr(CSR_MEPC).unwrap(),
-                                            )
-                                            .unwrap();
-                                            self.current_priv = Priv::from(mpp);
-
-                                            eprintln!("current_priv: {:?}", self.current_priv);
-
-                                            return Ok(EmulatorFlag::Jump);
-                                        } // MRET
-                                        _ => {
-                                            // Mモード以外で呼び出された場合は実装していない。
-                                            return Err(IllegralInstruction);
-                                        }
-                                    }, // MRET
-                                    _ => return Err(IllegralInstruction),
-                                }
-                            }
-                        }
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(
+                                63 - shift as u8,
+                                self.read_reg(Register::X(rs1))? >> shift,
+                            ),
+                        )?;
                     }
-                    0b001 => {
-                        let csr = if rd != 0 { self.read_csr(imm)? } else { 0 };
-                        self.write_csr(imm, self.read_reg(Register::X(rs1))?)?;
+                    "or" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))? | self.read_reg(Register::X(rs2))?,
+                    )?,
+                    "srl" => {
+                        let shift = self.read_reg(Register::X(rs2))? & 0x3f;
 
-                        if rd != 0 {
-                            self.write_reg(Register::X(rd), csr)?;
-                        }
-                    } // CSRRW
-                    0b010 => {
-                        let csr = self.read_csr(imm)?;
-                        let rs1 = self.read_reg(Register::X(rs1))?;
+                        self.write_reg(Register::X(rd), self.read_reg(Register::X(rs1))? >> shift)?;
+                    }
+                    "and" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rs1))? & self.read_reg(Register::X(rs2))?,
+                    )?,
+                    "addw" => self.write_reg(
+                        Register::X(rd),
+                        sign_extend(
+                            31,
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(self.read_reg(Register::X(rs2))?)
+                                & 0xffffffff,
+                        ),
+                    )?,
+                    "subw" => self.write_reg(
+                        Register::X(rd),
+                        sign_extend(
+                            31,
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_sub(self.read_reg(Register::X(rs2))?)
+                                & 0xffffffff,
+                        ),
+                    )?,
+                    "sllw" => self.write_reg(
+                        Register::X(rd),
+                        sign_extend(
+                            31,
+                            (self.read_reg(Register::X(rs1))?
+                                << (self.read_reg(Register::X(rs2))? & 0x1f))
+                                & 0xffffffff,
+                        ),
+                    )?,
+                    "srlw" => {
+                        let shift = self.read_reg(Register::X(rs2))? & 0x1f;
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(
+                                31,
+                                ((self.read_reg(Register::X(rs1))? & 0xffffffff) >> shift)
+                                    & 0xffffffff,
+                            ),
+                        )?;
+                    }
+                    "sraw" => {
+                        let shift = self.read_reg(Register::X(rs2))? & 0x1f;
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(
+                                31 - shift as u8,
+                                ((self.read_reg(Register::X(rs1))? & 0xffffffff) >> shift)
+                                    & 0xffffffff,
+                            ),
+                        )?;
+                    }
+                    _ => unimplemented!(),
+                }
+            }
+            S => {
+                let (rs1, rs2, imm) = extract_s_type(self.inst.raw());
 
-                        self.write_reg(Register::X(rd), csr)?;
+                match self.inst.name() {
+                    "sb" => {
+                        let bytes = (self.read_reg(Register::X(rs2))? as u8).to_le_bytes();
 
-                        if rs1 != 0 {
-                            self.write_csr(imm, csr | rs1)?;
-                        }
-                    } // CSRRS
-                    0b011 => {
-                        let csr = self.read_csr(imm)?;
-                        let rs1 = self.read_reg(Register::X(rs1))?;
+                        self.write_memory(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                            &bytes,
+                        )?;
+                    }
+                    "sh" => {
+                        let bytes = (self.read_reg(Register::X(rs2))? as u16).to_le_bytes();
 
-                        self.write_reg(Register::X(rd), csr)?;
+                        self.write_memory(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                            &bytes,
+                        )?;
+                    }
+                    "sw" => {
+                        let bytes = (self.read_reg(Register::X(rs2))? as u32).to_le_bytes();
 
-                        if rs1 != 0 {
-                            self.write_csr(imm, csr & !rs1)?;
-                        }
-                    } // CSRRC
-                    0b101 => {
-                        let csr = if rd != 0 { self.read_csr(imm)? } else { 0 };
+                        self.write_memory(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                            &bytes,
+                        )?;
+                    }
+                    "sd" => {
+                        let bytes = self.read_reg(Register::X(rs2))?.to_le_bytes();
 
-                        self.write_csr(imm, rs1 as u64)?;
+                        self.write_memory(
+                            self.read_reg(Register::X(rs1))?
+                                .wrapping_add(sign_extend(11, imm))
+                                as usize,
+                            &bytes,
+                        )?;
+                    }
+                    _ => unimplemented!(),
+                }
+            }
+            U => {
+                let (rd, imm) = extract_u_type(self.inst.raw());
 
-                        if rd != 0 {
-                            self.write_reg(Register::X(rd), csr)?;
-                        }
-                    } // CSRRWI
-                    0b110 => {
-                        let csr = self.read_csr(imm)?;
-
-                        self.write_reg(Register::X(rd), csr)?;
-
-                        if rs1 != 0 {
-                            self.write_csr(imm, csr | rs1 as u64)?;
-                        }
-                    } // CSRRSI
-                    0b111 => {
-                        let csr = self.read_csr(imm)?;
-
-                        self.write_reg(Register::X(rd), csr)?;
-
-                        if rs1 != 0 {
-                            self.write_csr(imm, csr & !rs1 as u64)?;
-                        }
-                    } // CSRRCI
+                match self.inst.name() {
+                    "auipc" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::Pc)?
+                            .wrapping_add(sign_extend(31, imm)),
+                    )?,
+                    "lui" => self.write_reg(Register::X(rd), sign_extend(31, imm))?,
                     _ => return Err(IllegralInstruction),
                 }
             }
-            _ => return Err(IllegralInstruction),
-        }
+            Other => match self.inst.name() {
+                "fence" => {
+                    // 並行処理系の工夫する構造はないので作るまでは実装しない。
+                    eprintln!("[warning]: fence may not work properly.");
 
-        Ok(EmulatorFlag::Common)
+                    match self.instruction {
+                        0x8330000f | 0x0100000f => {
+                            // FENCE.TSO PAUSEは実装していない
+                            return Err(IllegralInstruction);
+                        } // FENCE.TSO PAUSE
+                        _ => {} //fence
+                    }
+                }
+                "ecall" => match self.current_priv {
+                    Priv::M => return Err(EnvironmentCallFromMMode),
+                    Priv::S => return Err(EnvironmentCallFromSMode),
+                    Priv::U => return Err(EnvironmentCallFromUMode),
+                },
+                "mret" => {
+                    match self.current_priv {
+                        Priv::M => {
+                            let mstatus = self.read_raw_csr(CSR_MSTATUS).unwrap();
+
+                            let mpp = (mstatus & CSR_MSTATUS_MPP_MASK) >> 11;
+                            let mpie = (mstatus & CSR_MSTATUS_MPIE_MASK) >> 7;
+                            // Memory Privilege in mstatus Registerは後実装する。
+                            // let mprv = if mpp == Priv::M as u64 { 1 } else { 0 };
+
+                            let new_mstatus = (mstatus
+                                & !CSR_MSTATUS_MIE_MASK
+                                & !CSR_MSTATUS_MPP_MASK
+                                & !(CSR_MSTATUS_MPIE_MASK))
+                                | (mpie << 3)
+                                | (1 << 7)
+                                | ((Priv::U as u64) << 11);
+
+                            self.write_csr(CSR_MSTATUS, new_mstatus).unwrap();
+                            self.write_reg(Register::Pc, self.read_csr(CSR_MEPC).unwrap())
+                                .unwrap();
+                            self.current_priv = Priv::from(mpp);
+
+                            eprintln!("current_priv: {:?}", self.current_priv);
+                            self.inst.set_class(InstClass::Jump(true));
+                        } // MRET
+                        _ => {
+                            // Mモード以外で呼び出された場合は実装していない。
+                            return Err(IllegralInstruction);
+                        }
+                    }
+                }
+                _ => unimplemented!(),
+            },
+        };
+
+        Ok(())
     }
 
     // pcを一つ(4byte)進ませる関数
-    // run以外で呼ばれずに、例外を起こす可能性がないのでread_regを呼び出していない。
-    // run以外から呼んではいけない。
     fn progress_pc(&mut self) {
         self.pc += 4;
     }
@@ -1864,7 +1340,9 @@ impl Emulator {
             }
 
             eprintln!("PC: 0x{:016x}", self.pc,);
-            self.fetch();
+            let raw_inst = self.fetch();
+
+            let inst = self.decode(raw_inst);
 
             //if self.pc >= 0x1a8 && self.pc <= 0x1c4 {
             //    self.show_regs();
@@ -1877,11 +1355,11 @@ impl Emulator {
             //    break;
             //}
 
+            self.inst = inst;
+
             match self.exec() {
                 Err(e) => self.handle_exception(e),
-                Ok(flag) => {
-                    use EmulatorFlag::*;
-
+                Ok(_) => {
                     self.add_cycle();
 
                     if let Err(e) = self.check_interrupt_active() {
@@ -1889,10 +1367,8 @@ impl Emulator {
                         continue;
                     }
 
-                    match flag {
-                        Common => self.progress_pc(),
-                        ExeC => self.c_progress_pc(),
-                        Jump => {}
+                    if InstClass::Jump(true) != *self.inst.class() {
+                        self.progress_pc();
                     }
                 }
             }

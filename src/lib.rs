@@ -1,3 +1,4 @@
+pub mod cpu;
 pub mod csr;
 pub mod emulator;
 pub mod exception;

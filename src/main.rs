@@ -28,10 +28,19 @@ fn main() {
     let name = "si_tests";
 
     let si_tests = [
-        "rv64si-p-csr.bin",
-        "rv64si-p-ma_fetch.bin",
-        "rv64si-p-scall.bin",
-        "rv64si-p-wfi.bin",
+        "rv64um-p-div.bin",
+        "rv64um-p-divu.bin",
+        "rv64um-p-divuw.bin",
+        "rv64um-p-divw.bin",
+        "rv64um-p-mul.bin",
+        "rv64um-p-mulh.bin",
+        "rv64um-p-mulhsu.bin",
+        "rv64um-p-mulhu.bin",
+        "rv64um-p-mulw.bin",
+        "rv64um-p-rem.bin",
+        "rv64um-p-remu.bin",
+        "rv64um-p-remuw.bin",
+        "rv64um-p-remw.bin",
     ];
 
     display_start_test(name);
