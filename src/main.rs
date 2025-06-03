@@ -28,19 +28,25 @@ fn main() {
     let name = "si_tests";
 
     let si_tests = [
-        "rv64um-p-div.bin",
-        "rv64um-p-divu.bin",
-        "rv64um-p-divuw.bin",
-        "rv64um-p-divw.bin",
-        "rv64um-p-mul.bin",
-        "rv64um-p-mulh.bin",
-        "rv64um-p-mulhsu.bin",
-        "rv64um-p-mulhu.bin",
-        "rv64um-p-mulw.bin",
-        "rv64um-p-rem.bin",
-        "rv64um-p-remu.bin",
-        "rv64um-p-remuw.bin",
-        "rv64um-p-remw.bin",
+        "rv64ua-p-amoadd_d.bin",
+        "rv64ua-p-amoadd_w.bin",
+        "rv64ua-p-amoand_d.bin",
+        "rv64ua-p-amoand_w.bin",
+        "rv64ua-p-amomax_d.bin",
+        "rv64ua-p-amomax_w.bin",
+        "rv64ua-p-amomaxu_d.bin",
+        "rv64ua-p-amomaxu_w.bin",
+        "rv64ua-p-amomin_d.bin",
+        "rv64ua-p-amomin_w.bin",
+        "rv64ua-p-amominu_d.bin",
+        "rv64ua-p-amominu_w.bin",
+        "rv64ua-p-amoor_d.bin",
+        "rv64ua-p-amoor_w.bin",
+        "rv64ua-p-amoswap_d.bin",
+        "rv64ua-p-amoswap_w.bin",
+        "rv64ua-p-amoxor_d.bin",
+        "rv64ua-p-amoxor_w.bin",
+        "rv64ua-p-lrsc.bin",
     ];
 
     display_start_test(name);

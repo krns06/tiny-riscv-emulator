@@ -1,7 +1,7 @@
 use std::{error::Error, path::Path};
 
 use crate::{
-    cpu::{Inst, InstClass},
+    cpu::{Inst, InstClass, InstIsa},
     csr::{
         Csr, CSR_MCAUSE, CSR_MEDELEG, CSR_MEPC, CSR_MIDELEG, CSR_MISA, CSR_MSTATUS,
         CSR_MSTATUS_MIE_MASK, CSR_MSTATUS_MPIE_MASK, CSR_MSTATUS_MPP_MASK, CSR_MSTATUS_SIE_MASK,
@@ -1199,6 +1199,197 @@ impl Emulator {
                             Register::X(rd),
                             sign_extend(31, if rs2 == 0 { rs1 } else { rs1 % rs2 }),
                         )?;
+                    }
+                    name if *self.inst.isa() == InstIsa::A => {
+                        let addr = self.read_reg(Register::X(rs1))? as usize;
+
+                        match name {
+                            "amoswap_w" | "lr_w" | "sc_w" | "amoadd_w" | "amoand_w"
+                            | "amoxor_w" | "amoor_w" | "amomin_w" | "amomax_w" | "amominu_w"
+                            | "amomaxu_w" => {
+                                // 32bit版の場合は4バイトアライメント
+                                self.check_misaligned(addr as u64)?;
+
+                                if name == "sc_w" {
+                                    // SC.W
+
+                                    if let Some(range) = self.pop_reserved_memory_range() {
+                                        // 予約領域が存在している場合
+
+                                        if range.0 <= addr && range.1 >= addr + 4 {
+                                            // 予約領域内の場合はそのメモリ領域に書き込みを行い、rdに0を書き込む。
+                                            self.write_memory(
+                                                addr,
+                                                &(self.read_reg(Register::X(rs2))? as u32)
+                                                    .to_le_bytes(),
+                                            )?;
+
+                                            self.write_reg(Register::X(rd), 0)?;
+                                        } else {
+                                            // 上の条件に当てはまらない場合はrdに1を書き込むことにする。
+                                            self.write_reg(Register::X(rd), 1)?;
+                                        }
+                                    } else {
+                                        // ここで二回同じコードを書いているがif-let chainが使えるようになったら一つで済むようになる。
+                                        self.write_reg(Register::X(rd), 1)?;
+                                    }
+                                } else {
+                                    let v = u32::from_le_bytes(self.read_memory::<4>(addr)?);
+
+                                    match name {
+                                        "amoswap_w" => {
+                                            self.write_memory(
+                                                addr,
+                                                &(self.read_reg(Register::X(rs2))? as u32)
+                                                    .to_le_bytes(),
+                                            )?;
+                                            self.write_reg(Register::X(rs2), v as u64)?;
+                                        }
+                                        "lr_w" => {
+                                            self.write_reg(
+                                                Register::X(rd),
+                                                sign_extend(31, v as u64),
+                                            )?;
+                                            self.push_reserved_memory_range((addr, addr + 4));
+                                        }
+                                        "amoadd_w" => self.write_memory(
+                                            addr,
+                                            &(v.wrapping_add(
+                                                self.read_reg(Register::X(rs2))? as u32
+                                            ))
+                                            .to_le_bytes(),
+                                        )?,
+                                        "amoxor_w" => self.write_memory(
+                                            addr,
+                                            &(v ^ (self.read_reg(Register::X(rs2))? as u32))
+                                                .to_le_bytes(),
+                                        )?,
+                                        "amoand_w" => self.write_memory(
+                                            addr,
+                                            &(v & (self.read_reg(Register::X(rs2))? as u32))
+                                                .to_le_bytes(),
+                                        )?,
+                                        "amoor_w" => self.write_memory(
+                                            addr,
+                                            &(v | (self.read_reg(Register::X(rs2))? as u32))
+                                                .to_le_bytes(),
+                                        )?,
+
+                                        "amomin_w" => {
+                                            let rs2_val = self.read_reg(Register::X(rs2))? as u32;
+
+                                            self.write_memory(
+                                                addr,
+                                                &(if rs2_val as i32 > v as i32 {
+                                                    v
+                                                } else {
+                                                    rs2_val
+                                                })
+                                                .to_le_bytes(),
+                                            )?;
+                                        }
+                                        "amomax_w" => {
+                                            let rs2_val = self.read_reg(Register::X(rs2))? as u32;
+
+                                            self.write_memory(
+                                                addr,
+                                                &(if v as i32 > rs2_val as i32 {
+                                                    v
+                                                } else {
+                                                    rs2_val
+                                                })
+                                                .to_le_bytes(),
+                                            )?;
+                                        }
+                                        "amominu_w" => self.write_memory(
+                                            addr,
+                                            &v.min(self.read_reg(Register::X(rs2))? as u32)
+                                                .to_le_bytes(),
+                                        )?,
+                                        "amomaxu_w" => self.write_memory(
+                                            addr,
+                                            &v.max(self.read_reg(Register::X(rs2))? as u32)
+                                                .to_le_bytes(),
+                                        )?,
+                                        _ => unimplemented!(),
+                                    }
+
+                                    self.write_reg(Register::X(rd), sign_extend(31, v as u64))?;
+                                }
+                            }
+                            "amoswap_d" | "amoxor_d" | "amoadd_d" | "amoand_d" | "amoor_d"
+                            | "amomin_d" | "amomax_d" | "amominu_d" | "amomaxu_d" => {
+                                // 64bit版の場合は8バイトアライメント
+                                self.check_misaligned_nbyte_misaligned(addr as u64, 8)?;
+
+                                let v = u64::from_le_bytes(self.read_memory::<8>(addr)?);
+
+                                match name {
+                                    "amoswap_d" => {
+                                        self.write_memory(
+                                            addr,
+                                            &self.read_reg(Register::X(rs2))?.to_le_bytes(),
+                                        )?;
+                                        self.write_reg(Register::X(rs2), v)?;
+                                    }
+                                    "amoxor_d" => self.write_memory(
+                                        addr,
+                                        &(v ^ self.read_reg(Register::X(rs2))?).to_le_bytes(),
+                                    )?,
+                                    "amoadd_d" => self.write_memory(
+                                        addr,
+                                        &(v.wrapping_add(self.read_reg(Register::X(rs2))?))
+                                            .to_le_bytes(),
+                                    )?,
+                                    "amoand_d" => self.write_memory(
+                                        addr,
+                                        &(v & self.read_reg(Register::X(rs2))?).to_le_bytes(),
+                                    )?,
+                                    "amoor_d" => self.write_memory(
+                                        addr,
+                                        &(v | self.read_reg(Register::X(rs2))?).to_le_bytes(),
+                                    )?,
+                                    "amomin_d" => {
+                                        let rs2_val = self.read_reg(Register::X(rs2))?;
+
+                                        self.write_memory(
+                                            addr,
+                                            &(if rs2_val as i64 > v as i64 {
+                                                v
+                                            } else {
+                                                rs2_val
+                                            })
+                                            .to_le_bytes(),
+                                        )?;
+                                    }
+                                    "amomax_d" => {
+                                        let rs2_val = self.read_reg(Register::X(rs2))?;
+
+                                        self.write_memory(
+                                            addr,
+                                            &(if v as i64 > rs2_val as i64 {
+                                                v
+                                            } else {
+                                                rs2_val
+                                            })
+                                            .to_le_bytes(),
+                                        )?;
+                                    }
+                                    "amominu_d" => self.write_memory(
+                                        addr,
+                                        &v.min(self.read_reg(Register::X(rs2))?).to_le_bytes(),
+                                    )?,
+                                    "amomaxu_d" => self.write_memory(
+                                        addr,
+                                        &v.max(self.read_reg(Register::X(rs2))?).to_le_bytes(),
+                                    )?,
+                                    _ => unimplemented!(),
+                                }
+
+                                self.write_reg(Register::X(rd), v)?;
+                            }
+                            _ => unimplemented!(),
+                        }
                     }
                     _ => unimplemented!(),
                 }

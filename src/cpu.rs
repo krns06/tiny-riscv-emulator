@@ -3,6 +3,7 @@ use crate::emulator::Emulator;
 #[derive(Debug, PartialEq, PartialOrd)]
 pub enum InstClass {
     Jump(bool),
+    Atomic,
     Alu,
     Csr,
     Load,
@@ -22,8 +23,9 @@ pub enum InstFormat {
     Other,
 }
 
-#[derive(Debug)]
-pub enum Isa {
+#[derive(Debug, PartialEq, PartialOrd)]
+pub enum InstIsa {
+    A,
     I,
     M,
     Zifencei,
@@ -36,7 +38,7 @@ pub struct Inst {
     name: String,
     class: InstClass,
     format: InstFormat,
-    isa: Isa,
+    isa: InstIsa,
     raw: u32,
 }
 
@@ -52,7 +54,7 @@ impl Inst {
             name: String::new(),
             class: InstClass::Invalid,
             format: InstFormat::Other,
-            isa: Isa::Invalid,
+            isa: InstIsa::Invalid,
             raw: 0,
         }
     }
@@ -65,6 +67,10 @@ impl Inst {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn isa(&self) -> &InstIsa {
+        &self.isa
     }
 
     pub fn class(&self) -> &InstClass {
@@ -92,7 +98,7 @@ macro_rules! inst {
     ($op:ident, Jump, $isa:ident, $format:ident, $raw:expr) => {
         Inst {
             name: String::from(stringify!($op)),
-            isa: Isa::$isa,
+            isa: InstIsa::$isa,
             class: InstClass::Jump(false),
             format: InstFormat::$format,
             raw: $raw,
@@ -102,7 +108,7 @@ macro_rules! inst {
     ($op:ident, $class:ident, $isa:ident, $format:ident, $raw:expr) => {
         Inst {
             name: String::from(stringify!($op)),
-            isa: Isa::$isa,
+            isa: InstIsa::$isa,
             class: InstClass::$class,
             format: InstFormat::$format,
             raw: $raw,
@@ -125,7 +131,12 @@ impl Emulator {
         let op = raw_inst & 0x7f;
         let funct3 = (raw_inst >> 12) & 0x7;
 
-        println!("rv64 op: 0b{:07b} funct3: 0x{:x}", op, funct3);
+        println!(
+            "rv64 op: 0b{:07b} funct3: 0x{:x} inst[27:31]: 0b{:05b}",
+            op,
+            funct3,
+            raw_inst >> 27
+        );
 
         match op {
             0b0000011 => match funct3 {
@@ -164,6 +175,29 @@ impl Emulator {
                 0b001 => inst!(sh, Store, I, S, raw_inst),
                 0b010 => inst!(sw, Store, I, S, raw_inst),
                 0b011 => inst!(sd, Store, I, S, raw_inst),
+                _ => unimplemented!(),
+            },
+            0b0101111 => match (funct3, raw_inst >> 27) {
+                (0b010, 0) => inst!(amoadd_w, Atomic, A, R, raw_inst),
+                (0b010, 0b00001) => inst!(amoswap_w, Atomic, A, R, raw_inst),
+                (0b010, 0b00010) => inst!(lr_w, Atomic, A, R, raw_inst),
+                (0b010, 0b00011) => inst!(sc_w, Atomic, A, R, raw_inst),
+                (0b010, 0b00100) => inst!(amoxor_w, Atomic, A, R, raw_inst),
+                (0b010, 0b01000) => inst!(amoor_w, Atomic, A, R, raw_inst),
+                (0b010, 0b01100) => inst!(amoand_w, Atomic, A, R, raw_inst),
+                (0b010, 0b10000) => inst!(amomin_w, Atomic, A, R, raw_inst),
+                (0b010, 0b10100) => inst!(amomax_w, Atomic, A, R, raw_inst),
+                (0b010, 0b11000) => inst!(amominu_w, Atomic, A, R, raw_inst),
+                (0b010, 0b11100) => inst!(amomaxu_w, Atomic, A, R, raw_inst),
+                (0b011, 0) => inst!(amoadd_d, Atomic, A, R, raw_inst),
+                (0b011, 0b00001) => inst!(amoswap_d, Atomic, A, R, raw_inst),
+                (0b011, 0b00100) => inst!(amoxor_d, Atomic, A, R, raw_inst),
+                (0b011, 0b01000) => inst!(amoor_d, Atomic, A, R, raw_inst),
+                (0b011, 0b01100) => inst!(amoand_d, Atomic, A, R, raw_inst),
+                (0b011, 0b10000) => inst!(amomin_d, Atomic, A, R, raw_inst),
+                (0b011, 0b10100) => inst!(amomax_d, Atomic, A, R, raw_inst),
+                (0b011, 0b11000) => inst!(amominu_d, Atomic, A, R, raw_inst),
+                (0b011, 0b11100) => inst!(amomaxu_d, Atomic, A, R, raw_inst),
                 _ => unimplemented!(),
             },
             0b0110011 => match (funct3, raw_inst >> 25) {
