@@ -97,6 +97,13 @@ fn convert_from_c_reg_to_i(c_reg: u16) -> u8 {
     c_reg as u8 + 8
 }
 
+fn extract_cr_type(instruction: u16) -> (u8, u8) {
+    let rs2 = (instruction >> 2) & 0x1f;
+    let rd = (instruction >> 7) & 0x1f;
+
+    (rs2 as u8, rd as u8)
+}
+
 fn extract_ci_type(instruction: u16) -> (u8, u64) {
     let rd = (instruction >> 7) & 0x1f;
     let imm = ((instruction >> 7) & 0x20) | ((instruction >> 2) & 0x1f);
@@ -126,6 +133,13 @@ fn extract_cb_type(instruction: u16) -> (u8, u64) {
     let imm = ((instruction >> 5) & 0xe0) | ((instruction >> 2) & 0x1f);
 
     (rs1, imm as u64)
+}
+
+fn extract_css_type(instruction: u16) -> (u8, u64) {
+    let rs2 = (instruction >> 2) & 0x1f;
+    let imm = (instruction >> 7) & 0x3f;
+
+    (rs2 as u8, imm as u64)
 }
 
 fn calc_c_offset_5_3_2_6(imm: u64) -> u64 {
@@ -276,424 +290,25 @@ impl Emulator {
         u32::from_le_bytes(self.memory.read::<4>(self.pc as usize))
     }
 
-    // C拡張の形式の命令を実行する関数
-    fn c_exec(&mut self) -> Result<EmulatorFlag> {
-        self.c_instruction = self.instruction as u16;
-
-        // op
-        match self.c_instruction & 0x3 {
-            0b00 => {
-                // CL: (rd, rs1, imm)
-                // CS: (rs2, rs1, imm)
-                let (fr, sr, imm) = extract_clcs_type(self.c_instruction);
-
-                // funct3
-                match self.c_instruction >> 13 {
-                    0 => {
-                        let (rd, imm) = extract_ciw_type(self.c_instruction);
-
-                        if imm == 0 {
-                            // 予約されている。
-                            return Err(IllegralInstruction);
-                        }
-
-                        let nzuimm = ((imm & 0x3c) << 4)
-                            | ((imm & 0xc0) >> 2)
-                            | ((imm & 0x1) << 3)
-                            | ((imm & 0x2) << 1);
-                        self.write_reg(
-                            Register::X(rd),
-                            self.read_reg(Register::X(2))?.wrapping_add(nzuimm),
-                        )?;
-                    } // C.ADDI4SPN
-                    0b010 => {
-                        let offset = calc_c_offset_5_3_2_6(imm);
-
-                        let bytes = self.read_memory(
-                            self.read_reg(Register::X(sr))?.wrapping_add(offset) as usize,
-                        )?;
-
-                        self.write_reg(
-                            Register::X(fr),
-                            sign_extend(31, u32::from_le_bytes(bytes) as u64),
-                        )?;
-                    } //C.LW
-                    0b011 => {
-                        let offset = calc_c_offset_5_3_7_6(imm);
-                        let bytes = self.read_memory::<8>(
-                            self.read_reg(Register::X(sr))?.wrapping_add(offset) as usize,
-                        )?;
-
-                        self.write_reg(Register::X(fr), u64::from_le_bytes(bytes))?;
-                    } // C.LD
-                    0b110 => {
-                        let offset = calc_c_offset_5_3_2_6(imm);
-                        let bytes = (self.read_reg(Register::X(fr))? as u32).to_le_bytes();
-
-                        self.write_memory(
-                            self.read_reg(Register::X(sr))?.wrapping_add(offset) as usize,
-                            &bytes,
-                        )?;
-                    } // C.SW
-                    0b111 => {
-                        let offset = calc_c_offset_5_3_7_6(imm);
-                        let bytes = self.read_reg(Register::X(fr))?.to_le_bytes();
-
-                        self.write_memory(
-                            self.read_reg(Register::X(sr))?.wrapping_add(offset) as usize,
-                            &bytes,
-                        )?;
-                    } // C.SD
-                    _ => return Err(IllegralInstruction),
-                }
+    fn can_exec(&self) -> bool {
+        self.inst.is_valid()
+            && if self.inst.raw() & 0x3 < 3 {
+                self.is_c_extension_enabled()
+            } else {
+                true
             }
-            0b01 => {
-                let (rd, imm) = extract_ci_type(self.c_instruction);
-
-                let funct3 = self.c_instruction >> 13;
-
-                // funct3
-                match funct3 {
-                    0b000 => {
-                        if rd == 0 {
-                            // C.NOP
-                            // imm == 0の場合はNOPで以外のときはHINT？
-                            // 一旦HINTは無視して実装する。
-                        } else {
-                            // C.ADDI
-                            if imm == 0 {
-                                panic!("Error: Ths imm of C.ADDI is not zero.");
-                            }
-
-                            self.write_reg(
-                                Register::X(rd),
-                                self.read_reg(Register::X(rd))?
-                                    .wrapping_add(sign_extend(5, imm)),
-                            )?;
-                        }
-                    }
-                    0b001 => {
-                        if rd != 0 {
-                            self.write_reg(
-                                Register::X(rd),
-                                sign_extend(
-                                    31,
-                                    self.read_reg(Register::X(rd))?
-                                        .wrapping_add(sign_extend(5, imm))
-                                        & 0xffffffff,
-                                ),
-                            )?;
-                        } else {
-                            // rd=0は予約済み
-                            return Err(IllegralInstruction);
-                        }
-                    } // C.ADDIW
-                    0b010 => {
-                        if rd != 0 {
-                            self.write_reg(Register::X(rd), sign_extend(5, imm))?;
-                        } else {
-                            // rd=0の場合はHINTsをエンコードするらしい。
-                        }
-                    } // C.LI
-                    0b011 => {
-                        if rd == 0 {
-                            panic!("Error: x0 is not zero with op=0b01 funct3=0b011.");
-                        } else if rd == 2 {
-                            // C.ADDI16SP
-                            let nzimm = ((imm << 4) & 0x200)
-                                | ((imm << 6) & 0x180)
-                                | ((imm << 3) & 0x40)
-                                | ((imm << 5) & 0x20)
-                                | (imm & 0x10);
-
-                            self.write_reg(
-                                Register::X(2),
-                                self.read_reg(Register::X(2))?
-                                    .wrapping_add(sign_extend(9, nzimm)),
-                            )?;
-                        } else {
-                            // C.LUI
-                            if imm == 0 {
-                                panic!("Error: Ths imm of C.LUI is not zero.");
-                            }
-
-                            let nzimm = imm << 12;
-
-                            self.write_reg(Register::X(rd), sign_extend(17, nzimm))?;
-                        }
-                    }
-                    0b100 => {
-                        let funct2 = rd >> 3;
-                        let rd = convert_from_c_reg_to_i(rd as u16 & 0x7);
-
-                        match funct2 {
-                            0 => {
-                                if imm != 0 {
-                                    self.write_reg(
-                                        Register::X(rd),
-                                        self.read_reg(Register::X(rd))? >> imm,
-                                    )?;
-                                } else {
-                                    // imm=0の場合はHINTsをエンコードするらしい。
-                                }
-                            } // C.SRLI
-                            0b01 => {
-                                if imm != 0 {
-                                    self.write_reg(
-                                        Register::X(rd),
-                                        sign_extend(
-                                            63 - imm as u8,
-                                            self.read_reg(Register::X(rd))? >> imm,
-                                        ),
-                                    )?;
-                                } else {
-                                    // imm=0の場合はHINTsをエンコードするらしい。
-                                }
-                            } // C.SRAI
-                            0b10 => {
-                                self.write_reg(
-                                    Register::X(rd),
-                                    self.read_reg(Register::X(rd))? & sign_extend(5, imm),
-                                )?;
-                            } // C.ANDI
-                            0b11 => {
-                                let rs2 = convert_from_c_reg_to_i(imm as u16 & 0x7);
-
-                                // funct6[2], funct2
-                                match (imm >> 5, (imm >> 3) & 0x3) {
-                                    (0, 0) => {
-                                        self.write_reg(
-                                            Register::X(rd),
-                                            self.read_reg(Register::X(rd))?
-                                                .wrapping_sub(self.read_reg(Register::X(rs2))?),
-                                        )?;
-                                    } // C.SUB
-                                    (0, 0b01) => {
-                                        self.write_reg(
-                                            Register::X(rd),
-                                            self.read_reg(Register::X(rd))?
-                                                ^ self.read_reg(Register::X(rs2))?,
-                                        )?;
-                                    } // C.XOR
-                                    (0, 0b10) => {
-                                        self.write_reg(
-                                            Register::X(rd),
-                                            self.read_reg(Register::X(rd))?
-                                                | self.read_reg(Register::X(rs2))?,
-                                        )?;
-                                    } // C.OR
-                                    (0, 0b11) => {
-                                        self.write_reg(
-                                            Register::X(rd),
-                                            self.read_reg(Register::X(rd))?
-                                                & self.read_reg(Register::X(rs2))?,
-                                        )?;
-                                    } // C.AND
-                                    (0b1, 0) => {
-                                        self.write_reg(
-                                            Register::X(rd),
-                                            sign_extend(
-                                                31,
-                                                self.read_reg(Register::X(rd))?
-                                                    .wrapping_sub(self.read_reg(Register::X(rs2))?)
-                                                    & 0xffffffff,
-                                            ),
-                                        )?;
-                                    } // C.SUBW
-                                    (0b1, 0b01) => {
-                                        self.write_reg(
-                                            Register::X(rd),
-                                            sign_extend(
-                                                31,
-                                                self.read_reg(Register::X(rd))?
-                                                    .wrapping_add(self.read_reg(Register::X(rs2))?)
-                                                    & 0xffffffff,
-                                            ),
-                                        )?;
-                                    } // C.ADDW
-                                    _ => return Err(IllegralInstruction),
-                                }
-                            }
-                            _ => return Err(IllegralInstruction),
-                        }
-                    }
-                    0b101 => {
-                        let imm = (self.c_instruction >> 1) & 0xffe;
-                        let offset = (imm & 0xb40)
-                            | ((imm << 3) & 0x400)
-                            | ((imm << 2) & 0x80)
-                            | ((imm << 4) & 0x20)
-                            | ((imm >> 6) & 0x10)
-                            | ((imm >> 1) & 0xe);
-
-                        self.write_reg(
-                            Register::Pc,
-                            self.read_reg(Register::Pc)?
-                                .wrapping_add(sign_extend(11, offset as u64)),
-                        )?;
-
-                        return Ok(EmulatorFlag::Jump);
-                    } // C.J
-                    0b110 | 0b111 => {
-                        let (rs1, imm) = extract_cb_type(self.c_instruction);
-                        let offset = ((imm << 1) & 0x100)
-                            | ((imm << 3) & 0xc0)
-                            | ((imm << 5) & 0x20)
-                            | ((imm >> 2) & 0x18)
-                            | (imm & 0x6);
-
-                        let rs1 = self.read_reg(Register::X(rs1))?;
-
-                        // C.BEQZ or C.BNEZ
-                        if (funct3 == 0b110 && rs1 == 0) || (funct3 == 0b111 && rs1 != 0) {
-                            self.write_reg(
-                                Register::Pc,
-                                self.read_reg(Register::Pc)?
-                                    .wrapping_add(sign_extend(8, offset)),
-                            )?;
-                            return Ok(EmulatorFlag::Jump);
-                        }
-                    }
-                    _ => return Err(IllegralInstruction),
-                }
-            }
-            0b10 => {
-                let (rd, imm) = extract_ci_type(self.c_instruction);
-
-                match self.c_instruction >> 13 {
-                    0 => {
-                        if rd != 0 && imm != 0 {
-                            self.write_reg(
-                                Register::X(rd),
-                                self.read_reg(Register::X(rd))? << imm,
-                            )?;
-                        } else {
-                            // rd=0またはimm=0の場合はHINTsをエンコードするらしい。
-                        }
-                    } // C.SLLI
-                    0b010 => {
-                        if rd == 0 {
-                            // rd=0は予約済み
-                            return Err(IllegralInstruction);
-                        }
-
-                        let offset = ((imm << 6) & 0xc0) | (imm & 0x3c);
-
-                        let bytes = self.read_memory::<4>(
-                            self.read_reg(Register::X(2))?.wrapping_add(offset) as usize,
-                        )?;
-
-                        self.write_reg(
-                            Register::X(rd),
-                            sign_extend(31, u32::from_le_bytes(bytes) as u64),
-                        )?;
-                    } // C.LWSP
-                    0b011 => {
-                        if rd == 0 {
-                            // rd=0は予約済み
-                            return Err(IllegralInstruction);
-                        }
-
-                        let offset = ((imm << 6) & 0xc0) | (imm & 0x3c);
-
-                        self.write_reg(
-                            Register::X(rd),
-                            u64::from_le_bytes(self.read_memory::<8>(
-                                self.read_reg(Register::X(2))?.wrapping_add(offset) as usize,
-                            )?),
-                        )?;
-                    } // C.LDSP
-                    0b100 => {
-                        let rs2 = imm as u8 & 0x1f;
-                        let funct4 = imm >> 5;
-
-                        if rd == 0 && rs2 == 0 && funct4 == 1 {
-                            // C.EBREAK
-                            return Err(IllegralInstruction);
-                        }
-
-                        if rs2 == 0 {
-                            // C.JR & C.JALR
-                            if rd == 0 {
-                                // rs1=0は予約済み
-                                return Err(IllegralInstruction);
-                            }
-
-                            if funct4 == 1 {
-                                // C.JALR
-                                self.write_reg(
-                                    Register::X(1),
-                                    self.read_reg(Register::Pc)?.wrapping_add(2),
-                                )?;
-                            }
-
-                            self.write_reg(Register::Pc, self.read_reg(Register::X(rd))? & !1)?;
-                            return Ok(EmulatorFlag::Jump);
-                        }
-
-                        if funct4 == 0 {
-                            // C.MV
-                            if rd == 0 {
-                                // rd=0の場合はHINTsをエンコードするらしい。
-                            } else {
-                                self.write_reg(Register::X(rd), self.read_reg(Register::X(rs2))?)?;
-                            }
-                        } else {
-                            // C.ADD
-                            if rd == 0 {
-                                // rd=0の場合はHINTsをエンコードするらしい。
-                            } else {
-                                self.write_reg(
-                                    Register::X(rd),
-                                    self.read_reg(Register::X(rd))?
-                                        .wrapping_add(self.read_reg(Register::X(rs2))?),
-                                )?;
-                            }
-                        }
-                    }
-                    0b110 => {
-                        let rs2 = (imm & 0x1f) as u8;
-                        let imm = (imm & 0x20) | rd as u64;
-                        let offset = ((imm << 6) & 0xc0) | (imm & 0x3c);
-
-                        let bytes = (self.read_reg(Register::X(rs2))? as u32).to_le_bytes();
-
-                        self.write_memory(
-                            self.read_reg(Register::X(2))?.wrapping_add(offset) as usize,
-                            &bytes,
-                        )?;
-                    } // C.SWSP
-                    0b111 => {
-                        let rs2 = (imm & 0x1f) as u8;
-                        let imm = (imm & 0x20) | rd as u64;
-                        let offset = ((imm << 6) & 0x7) | (imm & 0x38);
-
-                        self.write_memory(
-                            self.read_reg(Register::X(2))?.wrapping_add(offset) as usize,
-                            &self.read_reg(Register::X(rs2))?.to_le_bytes(),
-                        )?;
-                    } // C.SDSP
-                    _ => return Err(IllegralInstruction),
-                }
-            }
-            _ => return Err(IllegralInstruction),
-        }
-
-        Ok(EmulatorFlag::ExeC)
     }
 
     // 命令を格納するバイト列から実行する命令を判定し命令を実行する関数
-    // 例外が発生した場合は即座にErrに起こった例外に対応するException型の値を返す。
     fn exec(&mut self) -> Result<()> {
-        // 将来的にはここでISAが有効かどうかを判定する
-        if !self.inst.is_valid() {
+        if !self.can_exec() {
             // return Err(IllegralInstruction);
             panic!("{:x?}", self.inst);
         }
 
         use crate::cpu::InstFormat::*;
 
-        println!("[inst]: {:?}", self.inst);
+        let name = self.inst.name();
 
         match self.inst.format() {
             B => {
@@ -702,7 +317,7 @@ impl Emulator {
 
                 let mut flag = false;
 
-                match self.inst.name() {
+                match name {
                     "beq" => {
                         flag =
                             self.read_reg(Register::X(rs1))? == self.read_reg(Register::X(rs2))?;
@@ -741,7 +356,7 @@ impl Emulator {
             I => {
                 let (rd, rs1, imm) = extract_i_type(self.inst.raw());
 
-                match self.inst.name() {
+                match name {
                     "lb" => {
                         let bytes = self.read_memory::<1>(
                             self.read_reg(Register::X(rs1))?
@@ -954,7 +569,7 @@ impl Emulator {
             R => {
                 let (rd, rs1, rs2, _) = extract_r_type(self.inst.raw());
 
-                match self.inst.name() {
+                match name {
                     "add" => self.write_reg(
                         Register::X(rd),
                         self.read_reg(Register::X(rs1))?
@@ -1397,7 +1012,7 @@ impl Emulator {
             S => {
                 let (rs1, rs2, imm) = extract_s_type(self.inst.raw());
 
-                match self.inst.name() {
+                match name {
                     "sb" => {
                         let bytes = (self.read_reg(Register::X(rs2))? as u8).to_le_bytes();
 
@@ -1444,7 +1059,7 @@ impl Emulator {
             U => {
                 let (rd, imm) = extract_u_type(self.inst.raw());
 
-                match self.inst.name() {
+                match name {
                     "auipc" => self.write_reg(
                         Register::X(rd),
                         self.read_reg(Register::Pc)?
@@ -1454,7 +1069,366 @@ impl Emulator {
                     _ => return Err(IllegralInstruction),
                 }
             }
-            Other => match self.inst.name() {
+            Ca => {
+                let (rd, imm) = extract_ci_type(self.inst.raw() as u16);
+                let rd = convert_from_c_reg_to_i(rd as u16 & 0x7);
+                let rs2 = convert_from_c_reg_to_i(imm as u16 & 0x7);
+
+                match name {
+                    "c_sub" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rd))?
+                            .wrapping_sub(self.read_reg(Register::X(rs2))?),
+                    )?,
+                    "c_xor" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rd))? ^ self.read_reg(Register::X(rs2))?,
+                    )?,
+                    "c_or" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rd))? | self.read_reg(Register::X(rs2))?,
+                    )?,
+                    "c_and" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rd))? & self.read_reg(Register::X(rs2))?,
+                    )?,
+                    "c_subw" => self.write_reg(
+                        Register::X(rd),
+                        sign_extend(
+                            31,
+                            self.read_reg(Register::X(rd))?
+                                .wrapping_sub(self.read_reg(Register::X(rs2))?)
+                                & 0xffffffff,
+                        ),
+                    )?,
+                    "c_addw" => self.write_reg(
+                        Register::X(rd),
+                        sign_extend(
+                            31,
+                            self.read_reg(Register::X(rd))?
+                                .wrapping_add(self.read_reg(Register::X(rs2))?)
+                                & 0xffffffff,
+                        ),
+                    )?,
+                    _ => unimplemented!(),
+                }
+            }
+            Cb => {
+                let (rd, offset) = extract_cb_type(self.inst.raw() as u16);
+                let imm = ((offset >> 2) & 0x20) | (offset & 0x1f);
+
+                match name {
+                    "c_srli" => {
+                        if imm != 0 {
+                            self.write_reg(
+                                Register::X(rd),
+                                self.read_reg(Register::X(rd))? >> imm,
+                            )?;
+                        } else {
+                            // imm=0の場合はHINTsをエンコードするらしい。
+                        }
+                    }
+                    "c_srai" => {
+                        if imm != 0 {
+                            self.write_reg(
+                                Register::X(rd),
+                                sign_extend(63 - imm as u8, self.read_reg(Register::X(rd))? >> imm),
+                            )?;
+                        } else {
+                            // imm=0の場合はHINTsをエンコードするらしい。
+                        }
+                    }
+                    "c_andi" => self.write_reg(
+                        Register::X(rd),
+                        self.read_reg(Register::X(rd))? & sign_extend(5, imm),
+                    )?,
+                    "c_beqz" | "c_bnez" => {
+                        let offset = ((offset << 1) & 0x100)
+                            | ((offset << 3) & 0xc0)
+                            | ((offset << 5) & 0x20)
+                            | ((offset >> 2) & 0x18)
+                            | (offset & 0x6);
+
+                        let rs1 = self.read_reg(Register::X(rd))?;
+
+                        // C.BEQZ or C.BNEZ
+                        if (name == "c_beqz" && rs1 == 0) || (name == "c_bnez" && rs1 != 0) {
+                            self.write_reg(
+                                Register::Pc,
+                                self.read_reg(Register::Pc)?
+                                    .wrapping_add(sign_extend(8, offset)),
+                            )?;
+
+                            self.inst.set_class(InstClass::Jump(true));
+                        }
+                    }
+                    _ => unimplemented!(),
+                }
+            }
+            Cj => match name {
+                "c_j" => {
+                    let imm = (self.inst.raw() >> 1) & 0xffe;
+                    let offset = (imm & 0xb40)
+                        | ((imm << 3) & 0x400)
+                        | ((imm << 2) & 0x80)
+                        | ((imm << 4) & 0x20)
+                        | ((imm >> 6) & 0x10)
+                        | ((imm >> 1) & 0xe);
+
+                    self.write_reg(
+                        Register::Pc,
+                        self.read_reg(Register::Pc)?
+                            .wrapping_add(sign_extend(11, offset as u64)),
+                    )?;
+
+                    self.inst.set_class(InstClass::Jump(true));
+                }
+                _ => unimplemented!(),
+            },
+            Ci => {
+                let (rd, imm) = extract_ci_type(self.inst.raw() as u16);
+
+                match name {
+                    "c_nop" => {}
+                    "c_addi" => {
+                        if imm == 0 {
+                            panic!("Error: Ths imm of C.ADDI is not zero.");
+                        }
+
+                        self.write_reg(
+                            Register::X(rd),
+                            self.read_reg(Register::X(rd))?
+                                .wrapping_add(sign_extend(5, imm)),
+                        )?;
+                    }
+                    "c_addiw" => {
+                        if rd != 0 {
+                            self.write_reg(
+                                Register::X(rd),
+                                sign_extend(
+                                    31,
+                                    self.read_reg(Register::X(rd))?
+                                        .wrapping_add(sign_extend(5, imm))
+                                        & 0xffffffff,
+                                ),
+                            )?;
+                        } else {
+                            // rd=0は予約済み
+                            panic!("Error: x0 is not zero with c_addiw.");
+                        }
+                    }
+                    "c_li" => {
+                        if rd != 0 {
+                            self.write_reg(Register::X(rd), sign_extend(5, imm))?;
+                        } else {
+                            // rd=0の場合はHINTsをエンコードするらしい。
+                        }
+                    }
+                    "c_lui" => {
+                        if imm == 0 {
+                            panic!("Error: x0 is not zero with c_lui.");
+                        }
+
+                        let nzimm = imm << 12;
+
+                        self.write_reg(Register::X(rd), sign_extend(17, nzimm))?;
+                    }
+                    "c_addi16sp" => {
+                        if rd == 0 {
+                            // rd=0は予約済み
+                            panic!("Error: x0 is not zero with c_addi16sp.");
+                        } else {
+                            let nzimm = ((imm << 4) & 0x200)
+                                | ((imm << 6) & 0x180)
+                                | ((imm << 3) & 0x40)
+                                | ((imm << 5) & 0x20)
+                                | (imm & 0x10);
+
+                            self.write_reg(
+                                Register::X(2),
+                                self.read_reg(Register::X(2))?
+                                    .wrapping_add(sign_extend(9, nzimm)),
+                            )?;
+                        }
+                    }
+                    "c_slli" => {
+                        if rd != 0 && imm != 0 {
+                            self.write_reg(
+                                Register::X(rd),
+                                self.read_reg(Register::X(rd))? << imm,
+                            )?;
+                        } else {
+                            // rd=0またはimm=0の場合はHINTsをエンコードするらしい。
+                        }
+                    }
+                    "c_lwsp" => {
+                        if rd == 0 {
+                            panic!("Error: Ths rd of {} is not zero.", name);
+                        }
+
+                        let offset = ((imm << 6) & 0xc0) | (imm & 0x3c);
+
+                        let bytes = self.read_memory::<4>(
+                            self.read_reg(Register::X(2))?.wrapping_add(offset) as usize,
+                        )?;
+
+                        self.write_reg(
+                            Register::X(rd),
+                            sign_extend(31, u32::from_le_bytes(bytes) as u64),
+                        )?;
+                    }
+                    "c_ldsp" => {
+                        if rd == 0 {
+                            panic!("Error: Ths rd of {} is not zero.", name);
+                        }
+
+                        let offset = ((imm << 6) & 0xc0) | (imm & 0x3c);
+
+                        self.write_reg(
+                            Register::X(rd),
+                            u64::from_le_bytes(self.read_memory::<8>(
+                                self.read_reg(Register::X(2))?.wrapping_add(offset) as usize,
+                            )?),
+                        )?;
+                    }
+                    _ => unimplemented!(),
+                }
+            }
+            Ciw => {
+                let (rd, imm) = extract_ciw_type(self.inst.raw() as u16);
+
+                match name {
+                    "c_addi4spn" => {
+                        if imm == 0 {
+                            // 予約されている。
+                            return Err(IllegralInstruction);
+                        }
+
+                        let nzuimm = ((imm & 0x3c) << 4)
+                            | ((imm & 0xc0) >> 2)
+                            | ((imm & 0x1) << 3)
+                            | ((imm & 0x2) << 1);
+                        self.write_reg(
+                            Register::X(rd),
+                            self.read_reg(Register::X(2))?.wrapping_add(nzuimm),
+                        )?;
+                    }
+                    _ => unimplemented!(),
+                }
+            }
+            Cr => {
+                let (rs2, rd) = extract_cr_type(self.inst.raw() as u16);
+
+                match name {
+                    "c_jr" | "c_jalr" => {
+                        if rd == 0 {
+                            panic!("Error: Ths rd of {} is not zero.", name);
+                        }
+
+                        if name == "c_jalr" {
+                            self.write_reg(
+                                Register::X(1),
+                                self.read_reg(Register::Pc)?.wrapping_add(2),
+                            )?;
+                        }
+
+                        self.write_reg(Register::Pc, self.read_reg(Register::X(rd))? & !1)?;
+                        self.inst.set_class(InstClass::Jump(true));
+                    }
+                    "c_mv" => {
+                        if rd == 0 {
+                            // rd=0の場合はHINTsをエンコードするらしい。
+                        } else {
+                            self.write_reg(Register::X(rd), self.read_reg(Register::X(rs2))?)?;
+                        }
+                    }
+                    "c_add" => {
+                        if rd == 0 {
+                            // rd=0の場合はHINTsをエンコードするらしい。
+                        } else {
+                            self.write_reg(
+                                Register::X(rd),
+                                self.read_reg(Register::X(rd))?
+                                    .wrapping_add(self.read_reg(Register::X(rs2))?),
+                            )?;
+                        }
+                    }
+                    _ => unimplemented!(),
+                }
+            }
+            Cl | Cs => {
+                // CL: (rd, rs1, imm)
+                // CS: (rs2, rs1, imm)
+                let (fr, sr, imm) = extract_clcs_type(self.inst.raw() as u16);
+
+                match name {
+                    "c_lw" => {
+                        let offset = calc_c_offset_5_3_2_6(imm);
+
+                        let bytes = self.read_memory(
+                            self.read_reg(Register::X(sr))?.wrapping_add(offset) as usize,
+                        )?;
+
+                        self.write_reg(
+                            Register::X(fr),
+                            sign_extend(31, u32::from_le_bytes(bytes) as u64),
+                        )?;
+                    }
+                    "c_ld" => {
+                        let offset = calc_c_offset_5_3_7_6(imm);
+                        let bytes = self.read_memory::<8>(
+                            self.read_reg(Register::X(sr))?.wrapping_add(offset) as usize,
+                        )?;
+
+                        self.write_reg(Register::X(fr), u64::from_le_bytes(bytes))?;
+                    }
+                    "c_sw" => {
+                        let offset = calc_c_offset_5_3_2_6(imm);
+                        let bytes = (self.read_reg(Register::X(fr))? as u32).to_le_bytes();
+
+                        self.write_memory(
+                            self.read_reg(Register::X(sr))?.wrapping_add(offset) as usize,
+                            &bytes,
+                        )?;
+                    }
+                    "c_sd" => {
+                        let offset = calc_c_offset_5_3_7_6(imm);
+                        let bytes = self.read_reg(Register::X(fr))?.to_le_bytes();
+
+                        self.write_memory(
+                            self.read_reg(Register::X(sr))?.wrapping_add(offset) as usize,
+                            &bytes,
+                        )?;
+                    }
+                    _ => unimplemented!(),
+                }
+            }
+            Css => {
+                let (rs2, imm) = extract_css_type(self.inst.raw() as u16);
+
+                match name {
+                    "c_swsp" => {
+                        let offset = ((imm << 6) & 0xc0) | (imm & 0x3c);
+
+                        let bytes = (self.read_reg(Register::X(rs2))? as u32).to_le_bytes();
+
+                        self.write_memory(
+                            self.read_reg(Register::X(2))?.wrapping_add(offset) as usize,
+                            &bytes,
+                        )?;
+                    }
+                    "c_sdsp" => {
+                        let offset = ((imm << 6) & 0x7) | (imm & 0x38);
+
+                        self.write_memory(
+                            self.read_reg(Register::X(2))?.wrapping_add(offset) as usize,
+                            &self.read_reg(Register::X(rs2))?.to_le_bytes(),
+                        )?;
+                    }
+                    _ => unimplemented!(),
+                }
+            }
+            Other => match name {
                 "fence" => {
                     // 並行処理系の工夫する構造はないので作るまでは実装しない。
                     eprintln!("[warning]: fence may not work properly.");
@@ -1511,14 +1485,13 @@ impl Emulator {
         Ok(())
     }
 
-    // pcを一つ(4byte)進ませる関数
+    // 実行した命令に応じてPCを進める関数
     fn progress_pc(&mut self) {
-        self.pc += 4;
-    }
-
-    // C拡張を実行されたあとにpcを進ませる関数
-    fn c_progress_pc(&mut self) {
-        self.pc += 2;
+        if *self.inst.isa() == InstIsa::C {
+            self.pc += 2;
+        } else {
+            self.pc += 4;
+        }
     }
 
     fn handle_exception(&mut self, e: Exception) {
@@ -1671,11 +1644,11 @@ impl Emulator {
             //    println!("csr: {:x?}", self.csr);
             //}
 
-            //if self.pc == 0x310 {
-            //    self.show_regs();
-            //    println!("csr: {:x?}", self.csr);
-            //    break;
-            //}
+            // if self.pc == 0x22c4 {
+            //     self.show_regs();
+            //     println!("csr: {:x?}", self.csr);
+            //     break;
+            // }
 
             self.inst = inst;
 

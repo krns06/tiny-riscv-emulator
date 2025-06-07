@@ -20,6 +20,15 @@ pub enum InstFormat {
     R,
     S,
     U,
+    Ca,
+    Cb,
+    Cj,
+    Ci,
+    Ciw,
+    Cl,
+    Cr,
+    Cs,
+    Css,
     Other,
 }
 
@@ -28,6 +37,7 @@ pub enum InstIsa {
     A,
     I,
     M,
+    C,
     Zifencei,
     Zicsr,
     Invalid,
@@ -117,26 +127,70 @@ macro_rules! inst {
 }
 
 impl Emulator {
-    pub(crate) fn decode(&self, raw_inst: u32) -> Inst {
-        if self.is_c_extension_enabled() && raw_inst & 0x3 < 3 {
-            // C拡張はまだ実装しない
-            unimplemented!();
-        }
+    fn c_decode(&self, raw_inst: u32) -> Inst {
+        let raw_inst = raw_inst & 0xffff;
 
-        // instruction & 0x3 != 3以外ならRV32もしくはRV64ではない可能性がある。
-        if raw_inst & 0x3 != 3 {
+        let op = raw_inst & 0x3;
+
+        match (op, raw_inst >> 13) {
+            (0, 0) => inst!(c_addi4spn, Alu, C, Ciw, raw_inst),
+            (0, 0b010) => inst!(c_lw, Load, C, Cl, raw_inst),
+            (0, 0b011) => inst!(c_ld, Load, C, Cl, raw_inst),
+            (0, 0b110) => inst!(c_sw, Store, C, Cs, raw_inst),
+            (0, 0b111) => inst!(c_sd, Store, C, Cs, raw_inst),
+            (0b01, 0b000) if (raw_inst >> 7) & 0x1f == 0 => inst!(c_nop, Alu, C, Ci, raw_inst),
+            (0b01, 0b000) => inst!(c_addi, Alu, C, Ci, raw_inst),
+            (0b01, 0b001) => inst!(c_addiw, Alu, C, Ci, raw_inst),
+            (0b01, 0b010) => inst!(c_li, Load, C, Ci, raw_inst),
+            (0b01, 0b011) if (raw_inst >> 7) & 0x1f == 0 => Inst::invalid(), // reserved
+            (0b01, 0b011) if (raw_inst >> 7) & 0x1f == 2 => inst!(c_addi16sp, Alu, C, Ci, raw_inst),
+            (0b01, 0b011) => inst!(c_lui, Load, C, Ci, raw_inst), // reserved
+            (0b01, 0b100) => match (raw_inst >> 10) & 0x3 {
+                0b00 => inst!(c_srli, Alu, C, Cb, raw_inst),
+                0b01 => inst!(c_srai, Alu, C, Cb, raw_inst),
+                0b10 => inst!(c_andi, Alu, C, Cb, raw_inst),
+                0b11 => match ((raw_inst >> 12) & 0x1, (raw_inst >> 5) & 0x3) {
+                    (0, 0) => inst!(c_sub, Alu, C, Ca, raw_inst),
+                    (0, 0b01) => inst!(c_xor, Alu, C, Ca, raw_inst),
+                    (0, 0b10) => inst!(c_or, Alu, C, Ca, raw_inst),
+                    (0, 0b11) => inst!(c_and, Alu, C, Ca, raw_inst),
+                    (1, 0b00) => inst!(c_subw, Alu, C, Ca, raw_inst),
+                    (1, 0b01) => inst!(c_addw, Alu, C, Ca, raw_inst),
+                    _ => unimplemented!(),
+                },
+                _ => unimplemented!(),
+            },
+            (0b01, 0b101) => inst!(c_j, Jump, C, Cj, raw_inst),
+            (0b01, 0b110) => inst!(c_beqz, Jump, C, Cb, raw_inst),
+            (0b01, 0b111) => inst!(c_bnez, Jump, C, Cb, raw_inst),
+            (0b10, 0) => inst!(c_slli, Alu, C, Ci, raw_inst),
+            (0b10, 0b010) => inst!(c_lwsp, Load, C, Ci, raw_inst),
+            (0b10, 0b011) => inst!(c_ldsp, Load, C, Ci, raw_inst),
+            (0b10, 0b100) if raw_inst == 0x9002 => inst!(c_ebreak, System, C, Other, raw_inst),
+            (0b10, 0b100) => match ((raw_inst >> 12) & 0x1, (raw_inst >> 2) & 0x1f) {
+                (0, 0) => inst!(c_jr, Jump, C, Cr, raw_inst),
+                (0, _) => inst!(c_mv, Alu, C, Cr, raw_inst),
+                (1, 0) => inst!(c_jalr, Jump, C, Cr, raw_inst),
+                (1, _) => inst!(c_add, Alu, C, Cr, raw_inst),
+                _ => unimplemented!(),
+            },
+            (0b10, 0b110) => inst!(c_swsp, Store, C, Css, raw_inst),
+            (0b10, 0b111) => inst!(c_sdsp, Store, C, Css, raw_inst),
+            _ => unimplemented!(),
+        }
+    }
+
+    pub(crate) fn decode(&self, raw_inst: u32) -> Inst {
+        if raw_inst == 0 {
             return Inst::invalid();
         }
 
         let op = raw_inst & 0x7f;
         let funct3 = (raw_inst >> 12) & 0x7;
 
-        println!(
-            "rv64 op: 0b{:07b} funct3: 0x{:x} inst[27:31]: 0b{:05b}",
-            op,
-            funct3,
-            raw_inst >> 27
-        );
+        if op & 0x3 < 3 {
+            return self.c_decode(raw_inst);
+        }
 
         match op {
             0b0000011 => match funct3 {
