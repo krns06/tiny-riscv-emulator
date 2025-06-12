@@ -27,11 +27,24 @@ fn main() {
 
     let name = "si_tests";
 
-    let si_tests = ["rv64uc-p-rvc.bin"];
+    let si_tests = [
+        "rv64mi-p-csr.bin",
+        "rv64mi-p-illegal.bin",
+        "rv64mi-p-ld-misaligned.bin",
+        "rv64mi-p-lh-misaligned.bin",
+        "rv64mi-p-lw-misaligned.bin",
+        "rv64mi-p-ma_addr.bin",
+        "rv64mi-p-ma_fetch.bin",
+        "rv64mi-p-mcsr.bin",
+        "rv64mi-p-sd-misaligned.bin",
+        "rv64mi-p-sh-misaligned.bin",
+        "rv64mi-p-sw-misaligned.bin",
+        "rv64mi-p-scall.bin",
+    ];
 
     display_start_test(name);
     for test in si_tests {
-        run_test(&mut emulator, test, 0x3000);
+        run_test(&mut emulator, test, 0x1000);
     }
     display_end_test(name);
 }

@@ -110,6 +110,43 @@ impl Default for Csr {
     }
 }
 
+impl Csr {
+    // csrを読み込む関数
+    // 権限やRWのチェック等を終わった段階で呼ぶ関数
+    // エイリアス等が存在するCSRを読み込む場合に対応するための関数
+    // 副作用はなく、ただ単純にCSRをよむのみを行う。
+    pub(crate) fn read(&self, csr: u64) -> Option<u64> {
+        match csr {
+            CSR_SSTATUS => Some(self.mstatus & CSR_SSTATUS_MASK), // sstatus
+            CSR_SIE => Some(self.mie & CSR_SIX_MASK),             // sie
+            CSR_STVEC => Some(self.stvec),                        // stvec
+            0x140 => Some(self.sscratch),                         // sscratch
+            CSR_SEPC => Some(self.sepc),                          // sepc
+            CSR_SCAUSE => Some(self.scause),                      // scause
+            CSR_SIP => Some(self.mip & CSR_SIX_MASK),             // sip
+            0x180 => Some(self.satp),                             // satp
+            CSR_MSTATUS => Some(self.mstatus),                    // mstatus
+            CSR_MISA => Some(self.misa),                          // misa
+            CSR_MEDELEG => Some(self.medeleg),                    // medeleg
+            CSR_MIDELEG => Some(self.mideleg),                    // mideleg
+            CSR_MIE => Some(self.mie),                            // mie
+            CSR_MTVEC => Some(self.mtvec),                        // mtvec
+            CSR_MCOUNTEREN => Some(self.mcounteren),              // mcounteren
+            0x340 => Some(self.mscratch),                         // mscratch
+            CSR_MEPC => Some(self.mepc),                          // mepc
+            CSR_MCAUSE => Some(self.mcause),                      // mcause
+            CSR_MTVAL => Some(self.mtval),                        // mtval
+            CSR_MIP => Some(self.mip),                            // mip
+            0x800 | CSR_CYCLE => Some(self.mcycle),               // mcycle or cycle
+            0xf11 => Some(0xba5eba11),                            // mvendorid(baseball)
+            0xf12 => Some(0x05500550),                            // mvendorid(ossoosso)
+            0xf13 => Some(0x1),                                   // mimpid(version 1)
+            0xf14 => Some(0),                                     // mhartid
+            _ => None,
+        }
+    }
+}
+
 impl Emulator {
     pub(crate) fn initialize_csr(&mut self) {
         self.csr = Csr::default();
@@ -184,38 +221,10 @@ impl Emulator {
     }
 
     // 暗黙的にcsrを読み込む関数
-    // 権限やRWのチェック等を終わった段階で呼ぶ関数
-    // エイリアス等が存在するCSRを読み込む場合に対応するための関数
-    // 副作用はなく、ただ単純にCSRをよむのみを行う。
-    // そのCSRが存在しない場合はIllegralInstructionを返す。
     pub(crate) fn read_raw_csr(&self, csr: u64) -> Result<u64> {
-        match csr {
-            CSR_SSTATUS => Ok(self.csr.mstatus & CSR_SSTATUS_MASK), // sstatus
-            CSR_SIE => Ok(self.csr.mie & CSR_SIX_MASK),             // sie
-            CSR_STVEC => Ok(self.csr.stvec),                        // stvec
-            0x140 => Ok(self.csr.sscratch),                         // sscratch
-            CSR_SEPC => Ok(self.csr.sepc),                          // sepc
-            CSR_SCAUSE => Ok(self.csr.scause),                      // scause
-            CSR_SIP => Ok(self.csr.mip & CSR_SIX_MASK),             // sip
-            0x180 => Ok(self.csr.satp),                             // satp
-            CSR_MSTATUS => Ok(self.csr.mstatus),                    // mstatus
-            CSR_MISA => Ok(self.csr.misa),                          // misa
-            CSR_MEDELEG => Ok(self.csr.medeleg),                    // medeleg
-            CSR_MIDELEG => Ok(self.csr.mideleg),                    // mideleg
-            CSR_MIE => Ok(self.csr.mie),                            // mie
-            CSR_MTVEC => Ok(self.csr.mtvec),                        // mtvec
-            CSR_MCOUNTEREN => Ok(self.csr.mcounteren),              // mcounteren
-            0x340 => Ok(self.csr.mscratch),                         // mscratch
-            CSR_MEPC => Ok(self.csr.mepc),                          // mepc
-            CSR_MCAUSE => Ok(self.csr.mcause),                      // mcause
-            CSR_MTVAL => Ok(self.csr.mtval),                        // mtval
-            CSR_MIP => Ok(self.csr.mip),                            // mip
-            0x800 | CSR_CYCLE => Ok(self.csr.mcycle),               // mcycle or cycle
-            0xf11 => Ok(0xba5eba11),                                // mvendorid(baseball)
-            0xf12 => Ok(0x05500550),                                // mvendorid(ossoosso)
-            0xf13 => Ok(0x1),                                       // mimpid(version 1)
-            0xf14 => Ok(0),                                         // mhartid
-            _ => Err(IllegralInstruction),
+        match self.csr.read(csr) {
+            Some(v) => Ok(v),
+            None => Err(IllegralInstruction),
         }
     }
 
@@ -243,21 +252,7 @@ impl Emulator {
         }
     }
 
-    // CSRを書き込む関数
-    pub(crate) fn write_csr(&mut self, csr: u64, value: u64) -> Result<()> {
-        if csr >> 12 != 0 {
-            panic!("Error: Unknown csr 0x{:016x}", csr);
-        }
-
-        if (csr >> 10) & 0x3 == 0b11 {
-            // read only
-            return Err(IllegralInstruction);
-        }
-
-        self.check_csr_priv(csr)?;
-
-        eprintln!("[info]: write 0x{:x}[csr] value: 0x{:x}", csr, value);
-
+    pub(crate) fn write_raw_csr(&mut self, csr: u64, value: u64) -> Result<()> {
         match csr {
             CSR_SSTATUS => {
                 if value & 0x80_00_00_01_00_01_e6_40 != 0 {
@@ -428,6 +423,24 @@ impl Emulator {
         }
 
         Ok(())
+    }
+
+    // CSRを書き込む関数
+    pub(crate) fn write_csr(&mut self, csr: u64, value: u64) -> Result<()> {
+        if csr >> 12 != 0 {
+            panic!("Error: Unknown csr 0x{:016x}", csr);
+        }
+
+        if (csr >> 10) & 0x3 == 0b11 {
+            // read only
+            return Err(IllegralInstruction);
+        }
+
+        self.check_csr_priv(csr)?;
+
+        eprintln!("[info]: write 0x{:x}[csr] value: 0x{:x}", csr, value);
+
+        self.write_raw_csr(csr, value)
     }
 }
 

@@ -301,14 +301,22 @@ impl Emulator {
             0b1100111 => inst!(jalr, Jump, I, I, raw_inst),
             0b1101111 => inst!(jal, Jump, I, J, raw_inst),
             0b1110011 => match funct3 {
-                0b000 => match raw_inst {
-                    0x00000073 => inst!(ecall, System, I, Other, raw_inst),
-                    0x30200073 => inst!(mret, System, I, Other, raw_inst),
-                    _ => unimplemented!(),
+                0b000 => match raw_inst >> 25 {
+                    0b0001001 => inst!(sfence_vma, System, Zifencei, R, raw_inst),
+                    _ => match raw_inst {
+                        0x00000073 => inst!(ecall, System, I, Other, raw_inst),
+                        0x10200073 => inst!(sret, System, I, Other, raw_inst),
+                        0x30200073 => inst!(mret, System, I, Other, raw_inst),
+                        0x10500073 => inst!(wfi, System, I, Other, raw_inst),
+                        _ => unimplemented!(),
+                    },
                 },
                 0b001 => inst!(csrrw, Csr, Zicsr, I, raw_inst),
                 0b010 => inst!(csrrs, Csr, Zicsr, I, raw_inst),
+                0b011 => inst!(csrrc, Csr, Zicsr, I, raw_inst),
                 0b101 => inst!(csrrwi, Csr, Zicsr, I, raw_inst),
+                0b110 => inst!(csrrsi, Csr, Zicsr, I, raw_inst),
+                0b111 => inst!(csrrci, Csr, Zicsr, I, raw_inst),
                 _ => unimplemented!(),
             },
             _ => unimplemented!("rv64 op: 0b{:07b} funct3: 0x{:x}", op, funct3),
